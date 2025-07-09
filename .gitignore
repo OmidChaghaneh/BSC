@@ -19,8 +19,9 @@ dist/
 build/
 *.egg-info/
 
-# Data
-data/samples/**
+# Data - ignore everything in data except .gitkeep files
+data/**/*
+!data/**/.gitkeep
 
 # IDE
 .idea/
