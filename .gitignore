@@ -19,9 +19,23 @@ dist/
 build/
 *.egg-info/
 
-# Data - ignore everything in data except .gitkeep files
-data/**/*
-!data/**/.gitkeep
+# Data - ignore specific file types but keep directory structure
+*.raw
+*.npy
+*.dcm
+*.tar
+*.lzo
+*.yml
+*.yaml
+raw_*_extracted/
+
+# Keep specific folders
+!data/
+!data/ROIs/
+!data/samples/
+!data/samples/UKDCEUS030/
+!data/samples/UKDCEUS034/
+!data/samples/UKDCEUS035/
 
 # IDE
 .idea/
