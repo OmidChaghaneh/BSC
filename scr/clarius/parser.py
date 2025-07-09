@@ -610,7 +610,7 @@ class ClariusParser():
         
         self.scan_converted = None
         
-        self.max_samples_per_line_C3 = 2896
+        self.max_samples_per_line_C3 = 2928
         self.max_samples_per_line_L15 = 2928
 
         self.__run()
@@ -633,7 +633,7 @@ class ClariusParser():
         self.remove_tgc()
         
         # create full signal
-        #self.set_full_signal()
+        self.set_full_signal()
         
         # Compute no TGC envelope
         #self.no_tgc_envelope_3d = get_signal_envelope_xd(self.rf_no_tgc_raw_data_3d,
@@ -1071,7 +1071,7 @@ class ClariusParser():
         def __init__(self, yml_path):
             
             self.path: str = yml_path
-            self.valid_versions: list[str] = ['12.0.1-673']
+            self.valid_versions: list[str] = ['12.0.1-673', '10.3.0-486']
             
             # rf.yml
             self.rf_software_version: str
