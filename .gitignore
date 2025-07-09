@@ -19,19 +19,8 @@ dist/
 build/
 *.egg-info/
 
-# Jupyter Notebook
-.ipynb_checkpoints
-*/.ipynb_checkpoints/*
-
-# Data files
-*.raw
-*.npy
-*.dcm
-*.tar
-*.lzo
-*.yml
-*.yaml
-data/samples/**/raw_*_extracted/
+# Data
+data/samples/**
 
 # IDE
 .idea/
