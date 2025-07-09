@@ -1,6 +1,6 @@
 # Standard Library Imports
 from pathlib import Path
-from typing import Union, Optional
+from typing import Union, Optional, Tuple
 import os
 import logging
 import shutil
@@ -437,9 +437,7 @@ class SingleSampleData:
     def __init__(self, 
                  sample_folder_path: Union[str, Path],
                  device: str = "C3",
-                 size: str = "large",
-                 mode: str = "read_single_sample",
-                 ):
+                 size: str = "large"):
         """
         Initialize the Data object with specified parameters.
         
@@ -447,13 +445,11 @@ class SingleSampleData:
             sample_folder_path (Union[str, Path]): Path to the sample folder containing extracted data
             device (str): Device type ("C3" or "L15")
             size (str): Size of the data ("large" or "small")
-            mode (str): Mode of operation ("read_data", "extract_data_s", "extract_data_m", "roi_detection", "broadband")
         """
         # Convert path to Path object if string
         self.sample_folder_path = Path(sample_folder_path)
         self.device = device
         self.size = size
-        self.mode = mode
                 
         # Extract sample name from path
         self.sample_name = self.sample_folder_path.name
@@ -466,11 +462,18 @@ class SingleSampleData:
         self.data_3d_roi_normal = None  
         self.data_3d_roi_unnormal = None 
         self.data_3d_phantom = None  # Store phantom data
-        self.data_3d_phantom_roi_unnormal = None  # Store phantom data cut with unnormal ROI
+        self.data_3d_phantom_roi = None  # Store phantom data cut with ROI
         
-        # Read data based on mode
-        if self.mode == "read_single_sample":
-            self.__run()
+        # Configuration parameters
+        self.sampling_frequency = 40e6  # 40 MHz sampling frequency
+        self.freq_band = [1e6, 10e6]  # Analysis frequency band 1-10 MHz
+        self.center_frequency = 5e6  # 5 MHz center frequency
+        self.ref_attenuation = 0.5  # dB/cm/MHz for reference phantom
+        self.ref_bsc = 1e-3  # 1/cm-sr for reference phantom
+        self.axial_res = 0.1  # mm, axial resolution
+        
+        # Read data
+        self.__run()
             
     def __run(self):
         self.read_extracted_folder()
@@ -479,7 +482,6 @@ class SingleSampleData:
         self.cut_data_based_on_roi()
         self.read_phantom_numpy()
         self.cut_phantom_data_based_on_roi()
-        
         
     def read_roi_data(self):
         """Read ROI data from the corresponding Excel file in the ROIs folder."""
@@ -772,14 +774,14 @@ class SingleSampleData:
                     return
                 
                 # Cut the phantom data for all frames using unnormal boundaries
-                self.data_3d_phantom_roi_unnormal = self.data_3d_phantom[v1_unnormal:v2_unnormal, h1_unnormal:h2_unnormal, :]
+                self.data_3d_phantom_roi = self.data_3d_phantom[v1_unnormal:v2_unnormal, h1_unnormal:h2_unnormal, :]
                 
                 # Validate results
-                if self.data_3d_phantom_roi_unnormal.size == 0:
-                    logging.error("Unnormal cut of phantom resulted in empty data")
+                if self.data_3d_phantom_roi.size == 0:
+                    logging.error("ROI cut of phantom resulted in empty data")
                     return
                     
-                logging.info(f"Successfully cut phantom data to unnormal ROI. New shape: {self.data_3d_phantom_roi_unnormal.shape}")
+                logging.info(f"Successfully cut phantom data to ROI. New shape: {self.data_3d_phantom_roi.shape}")
                 
             except Exception as e:
                 logging.error(f"Error processing ROI boundaries for phantom: {str(e)}")
@@ -825,4 +827,129 @@ class BSC:
     def bsc_ac_calculated_aplha(self):
         pass
     
+    
+    def calculate_bsc_AEK(self,
+                   roi_data: np.ndarray,
+                   phantom_data: np.ndarray,
+                   sampling_frequency: float = 40e6,
+                   freq_band: list = [1e6, 10e6],
+                   center_frequency: float = 5e6,
+                   ref_attenuation: float = 0.5,
+                   ref_bsc: float = 1e-3,
+                   axial_res: float = 0.1) -> float:
+        """
+        Calculate the backscatter coefficient (BSC) using the reference phantom method.
+        This method uses the ROI data and phantom data to compute BSC based on Yao et al. (1990).
+        
+        Args:
+            roi_data (np.ndarray): ROI data array (2D or 3D)
+            phantom_data (np.ndarray): Phantom data array (2D or 3D)
+            sampling_frequency (float, optional): Sampling frequency in Hz. Defaults to 40MHz.
+            freq_band (list, optional): Analysis frequency band [start, end] in Hz. Defaults to [1-10MHz].
+            center_frequency (float, optional): Center frequency in Hz. Defaults to 5MHz.
+            ref_attenuation (float, optional): Reference phantom attenuation in dB/cm/MHz. Defaults to 0.5.
+            ref_bsc (float, optional): Reference phantom BSC in 1/cm-sr. Defaults to 1e-3.
+            axial_res (float, optional): Axial resolution in mm. Defaults to 0.1.
+            
+        Returns:
+            float: Backscatter coefficient of the ROI (1/cm-sr)
+        """
+        NUM_FOURIER_POINTS = 8192
+        
+        def repmat(a: np.ndarray, m: int, n: int) -> np.ndarray:
+            """
+            Replicates a matrix similar to MATLAB's repmat function.
+            """
+            return np.tile(a, (m, n))
+            
+        def compute_hanning_power_spec(rf_data: np.ndarray, start_frequency: int, end_frequency: int, 
+                                    sampling_frequency: int) -> Tuple[np.ndarray, np.ndarray]:
+            """Compute the power spectrum of 3D spatial RF data using a Hanning window."""
+            # Create Hanning Window Function for the axial dimension
+            unrm_wind = np.hanning(rf_data.shape[0])
+            wind_func_computations = unrm_wind * np.sqrt(len(unrm_wind) / sum(np.square(unrm_wind)))
+            wind_func = repmat(
+                wind_func_computations.reshape((rf_data.shape[0], 1)), 1, rf_data.shape[1]
+            )
+
+            # Frequency Range
+            frequency = np.linspace(0, sampling_frequency, NUM_FOURIER_POINTS)
+            f_low = round(start_frequency * (NUM_FOURIER_POINTS / sampling_frequency))
+            f_high = round(end_frequency * (NUM_FOURIER_POINTS / sampling_frequency))
+            freq_chop = frequency[f_low:f_high]
+
+            # Get PS
+            if rf_data.ndim == 3:
+                power_spectra = []
+                for i in range(rf_data.shape[2]):
+                    fft = np.square(
+                        abs(np.fft.fft(np.transpose(np.multiply(rf_data[:,:,i], wind_func)), NUM_FOURIER_POINTS) * rf_data[:,:,i].size)
+                    )
+                    full_ps = np.mean(fft, axis=0)
+                    power_spectra.append(full_ps[f_low:f_high])
+                ps = np.mean(power_spectra, axis=0)
+            elif rf_data.ndim == 2:
+                fft = np.square(
+                    abs(np.fft.fft(np.transpose(np.multiply(rf_data, wind_func)), NUM_FOURIER_POINTS) * rf_data.size)
+                )
+                full_ps = np.mean(fft, axis=0)
+                ps = full_ps[f_low:f_high]
+            else:
+                raise ValueError("Invalid RF data dimensions. Expected 2D or 3D data.")
+
+            return freq_chop, ps
+            
+        try:
+            # If 3D data is provided, use the center slice
+            if roi_data.ndim == 3:
+                center_frame = roi_data.shape[2] // 2
+                roi_data = roi_data[:, :, center_frame]
+            if phantom_data.ndim == 3:
+                center_frame = phantom_data.shape[2] // 2
+                phantom_data = phantom_data[:, :, center_frame]
+            
+            # Calculate power spectra using Hanning window
+            f, ps_roi = compute_hanning_power_spec(
+                roi_data, freq_band[0], freq_band[1], sampling_frequency
+            )
+            ps_roi = 20 * np.log10(ps_roi)
+            
+            _, ps_phantom = compute_hanning_power_spec(
+                phantom_data, freq_band[0], freq_band[1], sampling_frequency
+            )
+            ps_phantom = 20 * np.log10(ps_phantom)
+            
+            # Find index for center frequency
+            freq_idx = np.argmin(np.abs(f - center_frequency))
+            
+            # Get power spectrum values at center frequency
+            ps_sample = ps_roi[freq_idx]
+            ps_ref = ps_phantom[freq_idx]
+            
+            # Calculate signal ratio
+            s_ratio = ps_sample / ps_ref
+            
+            # Convert attenuation coefficients from dB to Neper
+            np_conversion_factor = np.log(10) / 20
+            ref_att_coef = ref_attenuation * np_conversion_factor  # Np/cm/MHz
+            
+            # Calculate window depth in cm
+            window_depth_cm = roi_data.shape[0] * axial_res / 10  # cm
+            
+            # Convert attenuation to current frequency
+            freq_mhz = center_frequency / 1e6
+            ref_att_coef *= freq_mhz  # Np/cm
+            
+            # Calculate attenuation compensation
+            att_comp = np.exp(4 * window_depth_cm * ref_att_coef)
+            
+            # Calculate BSC
+            bsc = s_ratio * ref_bsc * att_comp
+            
+            logging.info(f"Calculated BSC: {bsc:.2e} 1/cm-sr")
+            return bsc
+            
+        except Exception as e:
+            logging.error(f"Error calculating BSC: {str(e)}")
+            return None
     
