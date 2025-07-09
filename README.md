@@ -1,42 +1,54 @@
-# Backscatter Coefficient (BSC) Analysis
+# Ultrasound BSC Analysis
 
-This project processes Clarius ultrasound data files to calculate and analyze Backscatter Coefficients. It handles RF data from Clarius ultrasound devices, specifically designed to work with C3 and L15 probes.
+A Python-based tool for processing and analyzing ultrasound data, specifically focused on Backscatter Coefficient (BSC) analysis from Clarius ultrasound devices.
 
 ## Features
 
-- Extract and process Clarius ultrasound data files (.tar format)
-- Handle multiple probe types (C3 and L15) and FOV sizes (large and small)
-- Process RF data with and without TGC (Time Gain Compensation)
-- Save processed data as numpy arrays for further analysis
-- ROI selection and analysis capabilities
+- Process raw ultrasound data from Clarius devices (C3 and L15 probes)
+- Extract and handle RF (Radio Frequency) data
+- Apply TGC (Time Gain Compensation) corrections
+- ROI (Region of Interest) selection and analysis
+- BSC calculation and analysis
+- Support for both large and small field-of-view acquisitions
 
 ## Project Structure
 
 ```
 BSC/
-├── data/
-│   ├── ROIs/          # Excel files containing ROI information
-│   └── samples/       # Raw ultrasound data samples
-├── notebook/          # Jupyter notebooks for analysis
-├── scr/
-│   ├── analyze/       # Analysis modules
-│   ├── app/           # GUI applications
-│   └── clarius/       # Clarius data processing modules
-└── requirements.txt   # Python dependencies
+├── data/                    # Data directory (not included in repository)
+│   ├── ROIs/               # Region of Interest data files
+│   └── samples/            # Ultrasound sample data
+│       └── UKDCEUS*/      # Individual case directories
+├── notebook/               # Jupyter notebooks for analysis
+│   └── parser.ipynb       # Data parsing notebook
+├── scr/                    # Source code
+│   ├── analyze/           # Analysis modules
+│   │   └── bsc.py        # BSC calculation
+│   ├── app/              # Application code
+│   │   └── app_roi_selection.py  # ROI selection interface
+│   └── clarius/          # Clarius data handling
+│       ├── lzop.py       # LZO compression handling
+│       ├── main.py       # Main processing pipeline
+│       ├── objects.py    # Data objects
+│       ├── parser.py     # Data parser
+│       └── transforms.py # Data transformations
 ```
 
-## Installation
+## Setup
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/BSC.git
+git clone [repository-url]
 cd BSC
 ```
 
-2. Create and activate a virtual environment (optional but recommended):
+2. Create and activate a virtual environment:
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python -m venv .venv
+# On Windows
+.venv\\Scripts\\activate
+# On Unix or MacOS
+source .venv/bin/activate
 ```
 
 3. Install dependencies:
@@ -44,42 +56,68 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Usage
-
-### Processing Ultrasound Data
-
-1. Place your Clarius ultrasound data files in the `data/samples/` directory
-2. Run the main processing script:
-```python
-from scr.clarius.main import process_sample
-process_sample("path/to/sample/folder")
-```
-
-### ROI Selection
-
-Use the ROI selection app to define regions of interest:
-```python
-from scr.app.app_roi_selection import run_app
-run_app()
-```
+4. Prepare data directory:
+The `data/` directory structure is maintained in the repository, but you'll need to add your own data files:
+- Place ROI Excel files in `data/ROIs/`
+- Place ultrasound sample data in `data/samples/UKDCEUS*/`
 
 ## Data Structure
 
-The project expects Clarius ultrasound data in the following format:
-- `.tar` files containing raw RF data
-- Extracted folders containing:
-  - RF data files (`*_rf.raw`)
-  - Environment files (`*_env.raw`)
-  - Configuration files (`*.yml`)
+### Sample Data Organization
+Each case directory (UKDCEUS*) contains:
+- DICOM files (*.dcm)
+- Raw data archives (raw_*.tar)
+- Extracted data folders containing:
+  - RF data files (*.raw)
+  - Envelope data (*.env.raw)
+  - Configuration files (*.yml)
+  - TGC data (*.tgc.yml)
+  - Processed NumPy arrays (*.npy)
+
+### Supported Probes
+- C3 (Curvilinear): Large and small field of view
+- L15 (Linear): Large and small field of view
+
+## Usage
+
+1. **Data Processing Pipeline**
+```python
+from scr.clarius.main import unpack_clarius_data
+
+# Process a single sample
+unpacker = unpack_clarius_data("data/samples/UKDCEUS030", extraction_mode="single_sample")
+
+# Process multiple samples
+unpacker = unpack_clarius_data("data/samples", extraction_mode="multiple_samples")
+```
+
+2. **ROI Selection**
+```python
+from scr.app.app_roi_selection import run_roi_selection
+
+run_roi_selection()
+```
+
+3. **BSC Analysis**
+```python
+from scr.analyze.bsc import calculate_bsc
+
+# Calculate BSC for selected ROI
+bsc_results = calculate_bsc(data_path, roi_path)
+```
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
 ## License
 
-[Your chosen license] 
+[Add your license information here]
+
+## Contact
+
+[Add your contact information here] 
