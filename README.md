@@ -1,19 +1,16 @@
 # Backscatter Coefficient (BSC) Analysis Tool
 
-A Python-based tool for processing and analyzing ultrasound data, specifically focused on Backscatter Coefficient (BSC) analysis from Clarius ultrasound devices. This tool provides functionality for processing raw ultrasound data, ROI selection, and BSC calculation.
+A Python-based tool for processing and analyzing ultrasound data, specifically focused on Backscatter Coefficient (BSC) analysis from Clarius ultrasound devices. This tool provides functionality for processing raw ultrasound data BSC calculation.
 
 ## Features
 
-- Process raw ultrasound data from Clarius devices (C3 and L15 probes)
+- Process raw ultrasound data from Clarius devices (C3)
 - Extract and handle RF (Radio Frequency) data
 - Interactive ROI (Region of Interest) selection with GUI
 - BSC calculation with multiple normalization methods:
   - Phantom-based normalization
   - Healthy liver tissue normalization
-- Support for both large and small field-of-view acquisitions
-- Automated data processing pipeline for multiple samples
-- STFT (Short-Time Fourier Transform) based spectral analysis
-- Comprehensive data visualization tools
+
 
 ## Project Structure
 
@@ -40,18 +37,6 @@ BSC/
 ├── README.md              # Project documentation
 └── requirements.txt       # Python dependencies
 ```
-
-## Requirements
-
-- Python 3.8+
-- Dependencies listed in requirements.txt:
-  - numpy>=1.21.0: Numerical computations
-  - pandas>=1.3.0: Data manipulation
-  - pydicom>=2.3.0: DICOM file handling
-  - matplotlib>=3.4.0: Data visualization
-  - PyQt5>=5.15.0: GUI for ROI selection
-  - scipy>=1.7.0: Signal processing
-  - And others (see requirements.txt)
 
 ## Installation
 
@@ -84,7 +69,6 @@ pip install -r requirements.txt
 1. Sample Data (`data/samples/UKDCEUS*/`):
    - Raw ultrasound data files
    - Each case should have its own directory
-   - Supports both C3 and L15 probe data
 
 2. ROI Data (`data/ROIs/`):
    - Excel files (.xlsx) containing ROI coordinates
@@ -100,55 +84,72 @@ pip install -r requirements.txt
 
 ## Usage
 
-### 1. Data Processing Pipeline
+### 1. Data Unpacking
+
+The data unpacking process extracts and processes raw ultrasound data from Clarius devices. This is the first step in the analysis pipeline.
+
+```python
+from scr.clarius.main import ClariusDataUnpacker
+
+# Create an instance of the unpacker
+unpacker = ClariusDataUnpacker()
+
+# Unpack all samples in the data directory
+# This will:
+# 1. Clean up any existing extracted folders
+# 2. Extract .tar files for each sample
+# 3. Process and rename files based on device type
+# 4. Generate necessary numpy arrays and delay samples
+result = unpacker.unpack_data(path="data/samples")
+```
+
+The unpacker will:
+- Extract `.tar` files containing raw ultrasound data
+- Process RF (Radio Frequency) data files
+- Generate and save processed numpy arrays
+- Create delay sample information in Excel format
+- Organize files in a structured format for BSC calculation
+
+### 2. BSC Calculation
+
+The BSC (Backscatter Coefficient) calculation processes the unpacked data using either phantom-based or healthy liver tissue normalization.
 
 ```python
 from scr.clarius.main import BSC
 
-# Initialize BSC with parameters
+# Initialize BSC with required parameters
 bsc = BSC(
-    samples_folder_path="data/samples",  # Path to samples
-    roi_folder_path="data/ROIs",        # Path to ROI files
-    result_folder_path="data/results",   # Output path
+    # Data paths
+    samples_folder_path="data/samples",    # Path to unpacked samples
+    roi_folder_path="data/ROIs",          # Path to ROI Excel files
+    result_folder_path="data/results",     # Where to save results
+    
+    # Analysis parameters
     normalization_method="normalized_with_phantom",  # or "normalized_with_healthy_liver"
-    window="hann",       # STFT window type
-    nperseg=64,         # STFT segment length
-    noverlap=32         # STFT overlap
+    window="hann",     # STFT window type
+    nperseg=64,       # Number of data points in STFT segment
+    noverlap=32       # Overlap between segments
 )
 ```
 
-### 2. ROI Selection
+The BSC calculation:
+1. Loads unpacked sample data
+2. Applies ROI selection from Excel files
+3. Performs STFT (Short-Time Fourier Transform) analysis
+4. Calculates power spectra and ratios
+5. Saves results as CSV files:
+   - `power_ratio.csv`: Spectral power ratios
+   - `frequencies.csv`: Frequency values
+   - `depths.csv`: Depth measurements
 
-```python
-from scr.app.app_roi_selection import ROI_selector_app
-from PyQt5.QtWidgets import QApplication
-import sys
+#### Normalization Methods:
+- `normalized_with_phantom`: Uses phantom reference data
+- `normalized_with_healthy_liver`: Uses healthy liver tissue as reference
 
-app = QApplication(sys.argv)
-roi_selector = ROI_selector_app()
-roi_selector.show()
-sys.exit(app.exec_())
-```
-
-### 3. Jupyter Notebooks
-
-The project includes two Jupyter notebooks:
-- `BSC.ipynb`: For running BSC analysis
-- `unpacker.ipynb`: For data extraction and preprocessing
-
-## Key Parameters
-
-### BSC Calculation
-- `normalization_method`: Choose between phantom or healthy liver normalization
-- `window`: STFT window type (e.g., "hann", "hamming")
-- `nperseg`: Number of points per STFT segment
+#### Key Parameters:
+- `window`: STFT window type (e.g., "hann")
+- `nperseg`: Length of each STFT segment
 - `noverlap`: Number of overlapping points between segments
-
-### Probe Parameters
-- C3 Probe:
-  - Sampling frequency: 15MHz
-  - Frequency band: 1-6MHz
-  - Center frequency: 2.5MHz
 
 ## Output Data
 
@@ -157,18 +158,4 @@ The BSC calculation produces three CSV files per sample:
 2. `frequencies.csv`: Frequency values
 3. `depths.csv`: Depth values
 
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## License
-
-[Add your license information here]
-
-## Support
-
-For questions and support, please open an issue in the GitHub repository. 
+For questions, please open an issue in the GitHub repository. 
