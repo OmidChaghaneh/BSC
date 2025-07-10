@@ -4,11 +4,14 @@ from typing import Union, Optional, Tuple
 import os
 import logging
 import shutil
+import math
 
 # Third-Party Imports
 import numpy as np
 import pandas as pd
 import yaml
+from scipy.signal import stft, istft
+import matplotlib.pyplot as plt
 
 # Local Imports
 from .parser import ClariusTarUnpacker, ClariusParser
@@ -328,7 +331,6 @@ class ClariusDataUnpacker:
                     rf_raw_name = os.path.splitext(rf_raw_files[0])[0]
                     output_npy_filename = os.path.join(folder_path, f"{rf_raw_name}_no_tgc.npy")
                     output_excel_filename = os.path.join(folder_path, f"{rf_raw_name}_delay_samples.xlsx")
-                    output_depth_filename = os.path.join(folder_path, f"{rf_raw_name}_full_depth_mm.npy")
                     
                     np.save(output_npy_filename, rf_data)
                     logging.info(f"Saved RF data to: {output_npy_filename}")
@@ -336,9 +338,6 @@ class ClariusDataUnpacker:
                     df = pd.DataFrame({'rf_delay_samples': [rf_delay_samples]})
                     df.to_excel(output_excel_filename, index=False)
                     logging.info(f"Saved delay samples to: {output_excel_filename}")
-                    
-                    np.save(output_depth_filename, full_depth_mm)
-                    logging.info(f"Saved full depth to: {output_depth_filename}")
                     
                 except Exception as e:
                     logging.error(f"Error processing folder {folder_path}: {e}")
@@ -436,67 +435,91 @@ class SingleSampleData:
     
     def __init__(self, 
                  sample_folder_path: Union[str, Path],
-                 device: str = "C3",
-                 size: str = "large"):
+                 roi_file_path: Union[str, Path]):
         """
         Initialize the Data object with specified parameters.
         
         Args:
             sample_folder_path (Union[str, Path]): Path to the sample folder containing extracted data
-            device (str): Device type ("C3" or "L15")
-            size (str): Size of the data ("large" or "small")
+            roi_file_path (Union[str, Path]): Path to the ROI Excel file
         """
-        # Convert path to Path object if string
+        # Convert paths to Path objects if string
         self.sample_folder_path = Path(sample_folder_path)
-        self.device = device
-        self.size = size
-                
+        self.roi_file_path = Path(roi_file_path)
+        
+        # C3 probe parameters
+        self.device = 'C3'
+        self.size = 'large'
+        self.sampling_frequency = 15e6
+        self.freq_band = [1e6, 6e6]
+        self.center_frequency = 2.5e6
+                        
         # Extract sample name from path
         self.sample_name = self.sample_folder_path.name
         
         # Initialize data attributes
         self.data_3d = None
+        self.data_3d_phantom = None  # Store phantom data
         self.delay_samples = None
-        self.full_depth_mm = None
+        self.full_depth_cm = None
         self.roi_data = None
         self.data_3d_roi_normal = None  
         self.data_3d_roi_unnormal = None 
-        self.data_3d_phantom = None  # Store phantom data
         self.data_3d_phantom_roi = None  # Store phantom data cut with ROI
-        
-        # Configuration parameters
-        self.sampling_frequency = 40e6  # 40 MHz sampling frequency
-        self.freq_band = [1e6, 10e6]  # Analysis frequency band 1-10 MHz
-        self.center_frequency = 5e6  # 5 MHz center frequency
-        self.ref_attenuation = 0.5  # dB/cm/MHz for reference phantom
-        self.ref_bsc = 1e-3  # 1/cm-sr for reference phantom
-        self.axial_res = 0.1  # mm, axial resolution
+        self.data_3d_roi_unnormal_ac_fix_alpha = None
+        self.full_depth_cm_roi = None  # Store ROI-cut version of full_depth_cm
         
         # Read data
         self.__run()
             
     def __run(self):
+        
+        # read data
         self.read_extracted_folder()
+        self.create_depth_array()
         self.read_roi_data()
         self.correct_roi_data()
         self.cut_data_based_on_roi()
         self.read_phantom_numpy()
         self.cut_phantom_data_based_on_roi()
+              
+        # visualize	
+        # self.visualize_signal_with_fft(self.data_3d, label='Original full signal')
+        # self.visualize_signal_with_fft(self.data_3d_phantom, label='Phantom full signal')
+        # self.visualize_signal_with_fft(self.data_3d_roi_unnormal, label='ROI unnormal tissue signal')
+        # self.visualize_signal_with_fft(self.data_3d_roi_normal, label='ROI normal tissue signal')
+        # self.visualize_signal_with_fft(self.data_3d_phantom_roi, label='Phantom ROI signal')
+        
+    def create_depth_array(self):
+        """
+        Create depth array based on sampling frequency and shape of data_3d.
+        Uses speed of sound in tissue (1540 m/s) to convert time to distance.
+        Returns depth in centimeters.
+        """
+        # Speed of sound in tissue (m/s)
+        speed_of_sound = 1540
+        
+        # Calculate time array in seconds
+        time_array = np.arange(0, self.data_3d.shape[1]) / self.sampling_frequency
+        
+        # Calculate depth using speed of sound
+        # Divide by 2 because of round trip time (pulse-echo)
+        # Multiply by 100 to convert meters to centimeters
+        self.full_depth_cm = (time_array * speed_of_sound / 2) * 100
+        
+        logging.info(f"Created depth array with range: {self.full_depth_cm.min():.2f} to {self.full_depth_cm.max():.2f} cm")
         
     def read_roi_data(self):
-        """Read ROI data from the corresponding Excel file in the ROIs folder."""
+        """Read ROI data from the specified Excel file."""
         try:
-            # Construct the path to the ROI Excel file
-            roi_file_path = self.sample_folder_path.parent.parent / "ROIs" / f"{self.sample_name}.xlsx"
-            
-            if not roi_file_path.exists():
-                logging.warning(f"No ROI file found at: {roi_file_path}")
+            if not self.roi_file_path.exists():
+                logging.warning(f"No ROI file found at: {self.roi_file_path}")
                 return
                 
-            logging.info(f"Loading ROI data from: {roi_file_path}")
+            logging.info(f"Loading ROI data from: {self.roi_file_path}")
             
             # Read the Excel file
-            self.roi_data = pd.read_excel(roi_file_path)
+            self.roi_data = pd.read_excel(self.roi_file_path)
             logging.info(f"Loaded ROI data with shape: {self.roi_data.shape}")
             
         except Exception as e:
@@ -545,21 +568,6 @@ class SingleSampleData:
                             logging.warning("No rf_delay_samples column found in Excel file")
                     else:
                         logging.warning(f"No delay samples Excel file found matching pattern: {excel_pattern}")
-
-                    # Look for corresponding full depth mm numpy file
-                    depth_pattern = f"{self.device}_{self.size}_*_full_depth_mm.npy"
-                    depth_files = list(folder.glob(depth_pattern))
-
-                    if depth_files:
-                        # Load the first matching depth file
-                        depth_file = depth_files[0]
-                        logging.info(f"Loading full depth from: {depth_file}")
-                        
-                        # Load the depth data
-                        self.full_depth_mm = np.load(depth_file)
-                        logging.info(f"Loaded full depth: {self.full_depth_mm}")
-                    else:
-                        logging.warning(f"No full depth file found matching pattern: {depth_pattern}")
                     
                     break  # Stop after finding first matching file set
                     
@@ -622,6 +630,7 @@ class SingleSampleData:
         The cut data is stored in:
         - self.data_3d_roi_normal: using normal boundaries
         - self.data_3d_roi_unnormal: using unnormal boundaries
+        - self.full_depth_mm_roi: cut version of full_depth_mm using h1, h2
         
         The entire temporal dimension (shape[2]) is preserved in both cases.
         """
@@ -687,6 +696,11 @@ class SingleSampleData:
                 
                 # Cut the data for all frames using unnormal boundaries
                 self.data_3d_roi_unnormal = self.data_3d[v1_unnormal:v2_unnormal, h1_unnormal:h2_unnormal, :]
+                
+                # Cut the full_depth_mm array using unnormal boundaries (h1, h2)
+                if self.full_depth_cm is not None:
+                    self.full_depth_cm_roi = self.full_depth_cm[h1_unnormal:h2_unnormal]
+                    logging.info(f"Cut full_depth_cm array to ROI. New size: {len(self.full_depth_cm_roi)}")
                 
                 # Validate results
                 if self.data_3d_roi_normal.size == 0:
@@ -792,164 +806,352 @@ class SingleSampleData:
             logging.error(f"Data shapes - phantom_data: {self.data_3d_phantom.shape if self.data_3d_phantom is not None else None}, "
                         f"ROI data rows: {len(self.roi_data) if self.roi_data is not None else None}")
             raise
+ 
+    def visualize_signal_with_fft(self, data: np.ndarray, label: str = ''):
+        """
+        Visualize a signal and its FFT spectrum side by side.
+        Uses the central line from the first frame of the 3D data.
+
+        Args:
+            data (np.ndarray): 3D data array to visualize
+            label (str): Label for the plot title
+        """
+        try:
+            # Get first frame and central line
+            first_frame = data[:, :, 0]
+            central_line_idx = first_frame.shape[0] // 2
+            signal = first_frame[central_line_idx, :]
+
+            # Calculate time axis in microseconds
+            n = len(signal)
+            time = np.arange(n) / self.sampling_frequency
+            time_microseconds = time * 1e6  # Convert to microseconds
+
+            # Calculate FFT
+            fft_result = np.fft.fft(signal)
+            fft_freq = np.fft.fftfreq(n, 1/self.sampling_frequency)
+            
+            # Convert frequency to MHz and get positive frequencies
+            fft_freq_mhz = fft_freq / 1e6
+            positive_freq_mask = fft_freq_mhz >= 0
+            freq_positive = fft_freq_mhz[positive_freq_mask]
+            fft_magnitude_positive = np.abs(fft_result)[positive_freq_mask]
+
+            # Create figure
+            plt.figure(figsize=(14, 4))
+
+            # Plot the original signal
+            plt.subplot(1, 2, 1)  # 1 row, 2 columns, first subplot
+            plt.plot(time_microseconds, signal, color='blue')
+            plt.title(f'1D Signal Plot - {label}')
+            plt.xlabel('Time (µs)')
+            plt.ylabel('Amplitude')
+            plt.grid(True)
+
+            # Plot the positive FFT
+            plt.subplot(1, 2, 2)  # 1 row, 2 columns, second subplot
+            plt.plot(freq_positive, fft_magnitude_positive, color='green')
+            plt.title(f'FFT of Signal - {label}')
+            plt.xlabel('Frequency (MHz)')
+            plt.ylabel('Magnitude')
+            plt.grid(True)
+
+            plt.tight_layout()
+            plt.show()
+
+            logging.info(f"Visualized signal and FFT for {label}")
+
+        except Exception as e:
+            logging.error(f"Error in signal visualization: {str(e)}")
+            raise
 
 
-class BSC:
+
+
+class BSCSingleSample:
     
-    def __init__(self, sample_folder_path: Union[str, Path],
-                 device: str = "C3",
-                 size: str = "large",
-                 mode: str = "normalize_phantom"):
+    def __init__(self,
+                 single_sample_object: SingleSampleData,
+                 normalization_method: str,
+                 window: str,
+                 nperseg: int,
+                 noverlap: int):
         
-        self.sample_folder_path = Path(sample_folder_path)
-        self.device = device
-        self.size = size
-        self.mode = mode
-    
-        if self.mode == "normalize_phantom":
-            self.bsc_normalize_phantom()
-        elif self.mode == "normalize_healthy_liver":
-            self.bsc_normalize_healthy_liver()
-        elif self.mode == "ac_fix_alpha":
-            self.bsc_ac_fix_alpha()
-        elif self.mode == "ac_calculated_aplha":
-            pass
+        self.single_sample_object = single_sample_object
+        self.normalization_method = normalization_method      
         
-    def bsc_normalize_phantom(self):
-        pass
-    
-    def bsc_normalize_healthy_liver(self):
-        pass
-    
-    def bsc_ac_fix_alpha(self):
-        pass
-    
-    def bsc_ac_calculated_aplha(self):
-        pass
-    
-    
-    def calculate_bsc_AEK(self,
+        # device parameters
+        self.freq_band = self.single_sample_object.freq_band
+        self.center_frequency = self.single_sample_object.center_frequency
+        self.sampling_frequency=self.single_sample_object.sampling_frequency
+        
+        # stft parameters
+        self.window = window
+        self.nperseg = nperseg
+        self.noverlap = noverlap
+        
+        # Run the BSC calculation
+        self.__run()
+        
+    def __run(self):       
+
+        if self.normalization_method == "normalized_with_phantom":
+            self.calculate_bsc(roi_data=self.single_sample_object.data_3d_roi_unnormal[:,:,0],
+                                          phantom_data=self.single_sample_object.data_3d_phantom_roi[:,:,0],
+                                          window_depth_cm=self.single_sample_object.full_depth_cm_roi)
+            
+        elif self.normalization_method == "normalized_with_healthy_liver":
+            self.calculate_bsc(roi_data=self.single_sample_object.data_3d_roi_unnormal[:,:,0],
+                                          phantom_data=self.single_sample_object.data_3d_roi_normal[:,:,0],
+                                          window_depth_cm=self.single_sample_object.full_depth_cm_roi)
+            
+    def calculate_bsc(self,
                    roi_data: np.ndarray,
                    phantom_data: np.ndarray,
-                   sampling_frequency: float = 40e6,
-                   freq_band: list = [1e6, 10e6],
-                   center_frequency: float = 5e6,
-                   ref_attenuation: float = 0.5,
-                   ref_bsc: float = 1e-3,
-                   axial_res: float = 0.1) -> float:
+                   window_depth_cm: np.ndarray) -> float:
         """
-        Calculate the backscatter coefficient (BSC) using the reference phantom method.
-        This method uses the ROI data and phantom data to compute BSC based on Yao et al. (1990).
+        Calculate the backscatter coefficient (BSC) using the reference phantom method with STFT-based power spectra.
+        This method uses Short-Time Fourier Transform for spectral analysis instead of traditional windowing.
         
         Args:
             roi_data (np.ndarray): ROI data array (2D or 3D)
             phantom_data (np.ndarray): Phantom data array (2D or 3D)
-            sampling_frequency (float, optional): Sampling frequency in Hz. Defaults to 40MHz.
-            freq_band (list, optional): Analysis frequency band [start, end] in Hz. Defaults to [1-10MHz].
-            center_frequency (float, optional): Center frequency in Hz. Defaults to 5MHz.
-            ref_attenuation (float, optional): Reference phantom attenuation in dB/cm/MHz. Defaults to 0.5.
-            ref_bsc (float, optional): Reference phantom BSC in 1/cm-sr. Defaults to 1e-3.
-            axial_res (float, optional): Axial resolution in mm. Defaults to 0.1.
+            window_depth_cm (np.ndarray): Array of depth values in cm
             
         Returns:
             float: Backscatter coefficient of the ROI (1/cm-sr)
         """
-        NUM_FOURIER_POINTS = 8192
+        center_frequency = self.center_frequency
+        sampling_frequency=self.sampling_frequency
+                
+        # stft parameters
+        window = self.window
+        nperseg = self.nperseg
+        noverlap = self.noverlap
         
-        def repmat(a: np.ndarray, m: int, n: int) -> np.ndarray:
+        logging.info("Starting BSC calculation using HybridEcho method")
+        logging.info(f"Center frequency: {center_frequency/1e6:.1f} MHz")
+        logging.info(f"STFT parameters - Window: {window}, Segment length: {nperseg}, Overlap: {noverlap}")
+        
+        def compute_stft_power_spec(rf_data_2d: np.ndarray,
+                                  sampling_frequency: float) -> Tuple[np.ndarray, np.ndarray]:
             """
-            Replicates a matrix similar to MATLAB's repmat function.
+            Compute the power spectrum using STFT.
+            
+            Args:
+                rf_data (np.ndarray): Input RF data array (2D or 3D)
+                sampling_frequency (float): Sampling frequency
+                
+            Returns:
+                Tuple[np.ndarray, np.ndarray]: Frequencies and averaged power spectrum
             """
-            return np.tile(a, (m, n))
+            logging.debug(f"Computing STFT power spectrum for data shape: {rf_data_2d.shape}")
             
-        def compute_hanning_power_spec(rf_data: np.ndarray, start_frequency: int, end_frequency: int, 
-                                    sampling_frequency: int) -> Tuple[np.ndarray, np.ndarray]:
-            """Compute the power spectrum of 3D spatial RF data using a Hanning window."""
-            # Create Hanning Window Function for the axial dimension
-            unrm_wind = np.hanning(rf_data.shape[0])
-            wind_func_computations = unrm_wind * np.sqrt(len(unrm_wind) / sum(np.square(unrm_wind)))
-            wind_func = repmat(
-                wind_func_computations.reshape((rf_data.shape[0], 1)), 1, rf_data.shape[1]
-            )
-
-            # Frequency Range
-            frequency = np.linspace(0, sampling_frequency, NUM_FOURIER_POINTS)
-            f_low = round(start_frequency * (NUM_FOURIER_POINTS / sampling_frequency))
-            f_high = round(end_frequency * (NUM_FOURIER_POINTS / sampling_frequency))
-            freq_chop = frequency[f_low:f_high]
-
-            # Get PS
-            if rf_data.ndim == 3:
-                power_spectra = []
-                for i in range(rf_data.shape[2]):
-                    fft = np.square(
-                        abs(np.fft.fft(np.transpose(np.multiply(rf_data[:,:,i], wind_func)), NUM_FOURIER_POINTS) * rf_data[:,:,i].size)
-                    )
-                    full_ps = np.mean(fft, axis=0)
-                    power_spectra.append(full_ps[f_low:f_high])
-                ps = np.mean(power_spectra, axis=0)
-            elif rf_data.ndim == 2:
-                fft = np.square(
-                    abs(np.fft.fft(np.transpose(np.multiply(rf_data, wind_func)), NUM_FOURIER_POINTS) * rf_data.size)
-                )
-                full_ps = np.mean(fft, axis=0)
-                ps = full_ps[f_low:f_high]
-            else:
-                raise ValueError("Invalid RF data dimensions. Expected 2D or 3D data.")
-
-            return freq_chop, ps
+            # Initialize array to store power spectra for each line
+            power_spectra = []
             
+            # Process each line in the data
+            logging.info(f"Processing {rf_data_2d.shape[0]} lines with STFT")
+            for line_idx in range(rf_data_2d.shape[0]):
+                # Compute STFT for the current line
+                f, t, Zxx = stft(rf_data_2d[line_idx], fs=sampling_frequency, window=window,
+                               nperseg=nperseg, noverlap=noverlap)
+                
+                # Calculate power spectrum for this line
+                ps_line = np.mean(np.abs(Zxx)**2, axis=1)
+                power_spectra.append(ps_line)
+            
+            # Convert list to numpy array and average across all lines
+            power_spectra = np.array(power_spectra)  # Shape: (n_lines, n_frequencies)
+            
+            logging.info(f"Completed STFT analysis for all lines")
+            logging.info(f"Computed power spectrum with shape - Input: {rf_data_2d.shape}, Output: {power_spectra.shape}")
+            
+            return f, power_spectra
+
+        def plot_power_spectra(f: np.ndarray, ps: np.ndarray, window_depth_cm: np.ndarray, label: str):
+            """
+            Plot power spectrum based on depth and frequency.
+            
+            Args:
+                f (np.ndarray): Frequency array
+                ps (np.ndarray): Power spectrum data
+                window_depth_cm (np.ndarray): Depth values in cm
+            """
+            try:
+                # Create depth array matching the number of lines in power spectra
+                depths = np.linspace(window_depth_cm[0], window_depth_cm[-1], ps.shape[0])
+                
+                # Convert frequency to MHz for better visualization
+                freq_mhz = f / 1e6
+                
+                # Create figure
+                plt.figure(figsize=(8, 6))
+                
+                # Plot power spectrum with swapped axes
+                plt.pcolormesh(depths, freq_mhz, ps.T, shading='auto', cmap='viridis')
+                plt.colorbar(label='Power (dB)')
+                plt.title(f'Power Spectrum {label}')
+                plt.xlabel('Depth (cm)')
+                plt.ylabel('Frequency (MHz)')
+                
+                plt.tight_layout()
+                plt.show()
+                
+                logging.info("Successfully plotted power spectrum")
+                
+            except Exception as e:
+                logging.error(f"Error plotting power spectrum: {str(e)}")
+                
         try:
-            # If 3D data is provided, use the center slice
-            if roi_data.ndim == 3:
-                center_frame = roi_data.shape[2] // 2
-                roi_data = roi_data[:, :, center_frame]
-            if phantom_data.ndim == 3:
-                center_frame = phantom_data.shape[2] // 2
-                phantom_data = phantom_data[:, :, center_frame]
-            
-            # Calculate power spectra using Hanning window
-            f, ps_roi = compute_hanning_power_spec(
-                roi_data, freq_band[0], freq_band[1], sampling_frequency
+            # Calculate power spectra using STFT
+            logging.info("Calculating power spectra using STFT")
+            f, ps_sample = compute_stft_power_spec(
+                roi_data, sampling_frequency
             )
-            ps_roi = 20 * np.log10(ps_roi)
+            ps_sample = 20 * np.log10(ps_sample)
             
-            _, ps_phantom = compute_hanning_power_spec(
-                phantom_data, freq_band[0], freq_band[1], sampling_frequency
+            _, ps_phantom = compute_stft_power_spec(
+                phantom_data, sampling_frequency
             )
             ps_phantom = 20 * np.log10(ps_phantom)
             
-            # Find index for center frequency
-            freq_idx = np.argmin(np.abs(f - center_frequency))
+            # Plot power spectra
+            #plot_power_spectra(f, ps_sample, window_depth_cm, label="ROI")
+            #plot_power_spectra(f, ps_phantom, window_depth_cm, label="Phantom")
+                        
+            #print shape of f, ps_roi and ps_phantom
+            logging.info(f"Shape of f: {f.shape}")
+            logging.info(f"Shape of ps_sample: {ps_sample.shape}")
+            logging.info(f"Shape of ps_phantom: {ps_phantom.shape}")
             
-            # Get power spectrum values at center frequency
-            ps_sample = ps_roi[freq_idx]
-            ps_ref = ps_phantom[freq_idx]
+            logging.info("Power spectra calculation completed")
             
             # Calculate signal ratio
-            s_ratio = ps_sample / ps_ref
+            power_ratio_2d = ps_sample / ps_phantom  # Element-wise ratio
+            logging.info(f"Central frequency power ratio shape: {power_ratio_2d.shape}")
+                          
+            # plot results
+            #plot_power_spectra(f, power_ratio_2d, window_depth_cm, label="Power Ratio")
+            #plot_power_spectra(f, ps_sample, window_depth_cm, label="ROI")
+            #plot_power_spectra(f, ps_phantom, window_depth_cm, label="Phantom")
             
-            # Convert attenuation coefficients from dB to Neper
-            np_conversion_factor = np.log(10) / 20
-            ref_att_coef = ref_attenuation * np_conversion_factor  # Np/cm/MHz
+            # compatible depth with bsc
+            compatible_depth_with_bsc = np.linspace(window_depth_cm[0], window_depth_cm[-1], power_ratio_2d.shape[0])
             
-            # Calculate window depth in cm
-            window_depth_cm = roi_data.shape[0] * axial_res / 10  # cm
-            
-            # Convert attenuation to current frequency
-            freq_mhz = center_frequency / 1e6
-            ref_att_coef *= freq_mhz  # Np/cm
-            
-            # Calculate attenuation compensation
-            att_comp = np.exp(4 * window_depth_cm * ref_att_coef)
-            
-            # Calculate BSC
-            bsc = s_ratio * ref_bsc * att_comp
-            
-            logging.info(f"Calculated BSC: {bsc:.2e} 1/cm-sr")
-            return bsc
-            
+            # set data
+            self.power_ratio_2d = power_ratio_2d
+            self.f = f
+            self.depth_cm = compatible_depth_with_bsc
+           
         except Exception as e:
-            logging.error(f"Error calculating BSC: {str(e)}")
+            logging.error(f"Error calculating BSC with HybridEcho method: {str(e)}")
             return None
     
+    
+
+class BSC:
+    
+    def __init__(self,
+                 samples_folder_path: str,
+                 result_folder_path: str,
+                 roi_folder_path: str,
+                 normalization_method: str,
+                 window: str,
+                 nperseg: int,
+                 noverlap: int):
+        
+        self.samples_folder_path = samples_folder_path
+        self.result_folder_path = result_folder_path
+        self.roi_folder_path = roi_folder_path
+        self.normalization_method = normalization_method
+        
+        # stft parameters
+        self.window = window
+        self.nperseg = nperseg
+        self.noverlap = noverlap
+        
+        # run
+        self.__run()
+        
+    def save_bsc_results_as_csv(self, bsc_obj):
+        """
+        Save BSC results to CSV files in a matching folder structure.
+        
+        Args:
+            bsc_obj: BSC object containing results to save
+        """
+        try:
+            # Get sample name from the original sample path
+            sample_name = bsc_obj.single_sample_object.sample_name
+            
+            # Create result directory path mirroring the samples structure
+            result_dir = Path(self.result_folder_path) / sample_name
+            result_dir.mkdir(parents=True, exist_ok=True)
+            
+            logging.info(f"Saving BSC results for sample {sample_name} to {result_dir}")
+            
+            # Save power ratio data
+            power_ratio_path = result_dir / "power_ratio.csv"
+            np.savetxt(power_ratio_path, bsc_obj.power_ratio_2d, delimiter=',')
+            logging.info(f"Saved power ratio data to {power_ratio_path}")
+            
+            # Save frequency data
+            freq_path = result_dir / "frequencies.csv"
+            np.savetxt(freq_path, bsc_obj.f, delimiter=',')
+            logging.info(f"Saved frequency data to {freq_path}")
+            
+            # Save depth data
+            depth_path = result_dir / "depths.csv"
+            np.savetxt(depth_path, bsc_obj.depth_cm, delimiter=',')
+            logging.info(f"Saved depth data to {depth_path}")
+            
+        except Exception as e:
+            logging.error(f"Error saving BSC results: {str(e)}")
+            raise
+        
+    def __run(self):
+        
+        # get sample folder path from sample_folder_path
+        samples_folder_path = Path(self.samples_folder_path)
+        roi_folder_path = Path(self.roi_folder_path)
+        
+        # get all subfolders in sample_folder_path
+        subfolders = [f for f in samples_folder_path.iterdir() if f.is_dir()]
+        
+        # Process each sample
+        for subfolder in subfolders:
+            try:
+                logging.info(f"Processing sample: {subfolder.name}")
+                
+                # Construct ROI file path
+                roi_file_path = roi_folder_path / f"{subfolder.name}.xlsx"
+                
+                # Create SingleSampleData object first
+                single_sample_data = SingleSampleData(
+                    sample_folder_path=subfolder,
+                    roi_file_path=roi_file_path
+                )
+                
+                # Create BSCSingleSample object using the SingleSampleData object
+                bsc_single_sample_obj = BSCSingleSample(
+                    single_sample_object=single_sample_data,
+                    normalization_method=self.normalization_method,
+                    window=self.window,
+                    nperseg=self.nperseg,
+                    noverlap=self.noverlap
+                )
+                
+                # Save BSC results
+                self.save_bsc_results_as_csv(bsc_single_sample_obj)
+                logging.info(f"Completed processing sample: {subfolder.name}")
+                
+            except Exception as e:
+                logging.error(f"Error processing sample {subfolder.name}: {str(e)}")
+                continue  # Continue with next sample even if one fails 
+            
+            
+            
+            
+            
+            
