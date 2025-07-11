@@ -10,6 +10,8 @@ A Python-based tool for processing and analyzing ultrasound data, specifically f
 - BSC calculation with multiple normalization methods:
   - Phantom-based normalization
   - Healthy liver tissue normalization
+  - Constant alpha attenuation correction
+  - Calculated alpha attenuation correction
 
 
 ## Project Structure
@@ -24,6 +26,7 @@ BSC/
 │       └── UKDCEUS*/       # Individual case directories
 ├── notebook/               # Jupyter notebooks
 │   ├── BSC.ipynb          # BSC analysis notebook
+│   ├── results.ipynb      # Results analysis notebook
 │   └── unpacker.ipynb     # Data unpacking notebook
 ├── scr/                    # Source code
 │   ├── app/
@@ -81,6 +84,7 @@ pip install -r requirements.txt
 4. Results (`data/results/`):
    - Output directory for BSC calculations
    - Organized by case/sample name
+   - Contains depth (cm), frequency (MHz), and power ratio data
 
 ## Usage
 
@@ -112,7 +116,7 @@ The unpacker will:
 
 ### 2. BSC Calculation
 
-The BSC (Backscatter Coefficient) calculation processes the unpacked data using either phantom-based or healthy liver tissue normalization.
+The BSC (Backscatter Coefficient) calculation processes the unpacked data using one of four normalization methods.
 
 ```python
 from scr.clarius.main import BSC
@@ -125,10 +129,11 @@ bsc = BSC(
     result_folder_path="data/results",     # Where to save results
     
     # Analysis parameters
-    normalization_method="normalized_with_phantom",  # or "normalized_with_healthy_liver"
+    normalization_method="normalized_with_phantom",  # Choose normalization method
     window="hann",     # STFT window type
     nperseg=64,       # Number of data points in STFT segment
-    noverlap=32       # Overlap between segments
+    noverlap=32,      # Overlap between segments
+    alpha=0.5         # Attenuation coefficient (dB/cm/MHz) for constant alpha method
 )
 ```
 
@@ -139,23 +144,27 @@ The BSC calculation:
 4. Calculates power spectra and ratios
 5. Saves results as CSV files:
    - `power_ratio.csv`: Spectral power ratios
-   - `frequencies.csv`: Frequency values
-   - `depths.csv`: Depth measurements
+   - `frequencies_MHz.csv`: Frequency values in MHz
+   - `depths_cm.csv`: Depth measurements in cm
 
 #### Normalization Methods:
-- `normalized_with_phantom`: Uses phantom reference data
-- `normalized_with_healthy_liver`: Uses healthy liver tissue as reference
 
-#### Key Parameters:
-- `window`: STFT window type (e.g., "hann")
-- `nperseg`: Length of each STFT segment
-- `noverlap`: Number of overlapping points between segments
+1. **Phantom-based Normalization** (`normalized_with_phantom`):
+   - Uses reference phantom data for normalization
+   - Compensates for system-dependent effects
+   - Requires phantom data in `data/phantom/` directory
 
-## Output Data
+2. **Healthy Liver Normalization** (`normalized_with_healthy_liver`):
+   - Uses healthy liver tissue as reference
+   - Normalizes against normal tissue regions
 
-The BSC calculation produces three CSV files per sample:
-1. `power_ratio.csv`: Power spectrum ratios
-2. `frequencies.csv`: Frequency values
-3. `depths.csv`: Depth values
+3. **Constant Alpha Correction** (`normalized_with_constant_alpha`):
+   - Applies fixed attenuation coefficient (alpha)
+   - Uses STFT-based attenuation compensation
+   - Alpha specified in dB/cm/MHz
+   - Requires `alpha` parameter in BSC initialization
 
-For questions, please open an issue in the GitHub repository. 
+4. **Calculated Alpha Correction** (`normalized_with_calculated_alpha`):
+   - Automatically calculates attenuation coefficient from data
+   - Uses central frequency (2.5 MHz) for alpha estimation
+   - Applies frequency-dependent correction
