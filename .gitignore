@@ -32,6 +32,7 @@ raw_*_extracted/
 # Keep specific folders
 !data/
 !data/ROIs/
+!data/phantom/
 !data/samples/
 !data/samples/UKDCEUS030/
 !data/samples/UKDCEUS034/
