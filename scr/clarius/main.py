@@ -1,6 +1,6 @@
 # Standard Library Imports
 from pathlib import Path
-from typing import Union, Optional, Tuple
+from typing import Union, Optional, Tuple, List
 import os
 import logging
 import shutil
@@ -735,7 +735,7 @@ class SingleSampleData:
         try:
             # Construct phantom data path
             phantom_dir = Path("data/phantom")
-            phantom_file = f"{self.device}_{self.size}_rf.raw.no_tgc.npy"
+            phantom_file = f"{self.device}_{self.size}_rf_no_tgc.npy"
             phantom_path = phantom_dir / phantom_file
             
             if not phantom_path.exists():
@@ -876,49 +876,15 @@ class SingleSampleData:
         """
         Set the AC signal with a constant alpha by applying attenuation correction to the ROI data.
         This method uses STFT to apply depth and frequency dependent attenuation correction.
+        Processes the full 3D array, applying correction to each frame independently.
         """
-        def visualize_correction_example(original_signal, corrected_signal, depth_cm):
-            """
-            Visualize example of signal before and after attenuation correction.
-            
-            Args:
-                original_signal (np.ndarray): Original signal
-                corrected_signal (np.ndarray): Corrected signal
-                depth_cm (np.ndarray): Depth array in cm
-            """
-            try:
-                plt.figure(figsize=(12, 6))
-                
-                # Plot original signal
-                plt.subplot(2, 1, 1)
-                plt.plot(depth_cm, original_signal)
-                plt.title('Original Signal')
-                plt.xlabel('Depth (cm)')
-                plt.ylabel('Amplitude')
-                plt.grid(True)
-                
-                # Plot corrected signal
-                plt.subplot(2, 1, 2)
-                plt.plot(depth_cm, corrected_signal)
-                plt.title('Attenuation Corrected Signal')
-                plt.xlabel('Depth (cm)')
-                plt.ylabel('Amplitude')
-                plt.grid(True)
-                
-                plt.tight_layout()
-                plt.show()
-                
-                logging.info("Visualized correction example")
-                
-            except Exception as e:
-                logging.error(f"Error visualizing correction: {str(e)}")
-
         try:
             # Parameters
             speed_of_sound = 1540  # m/s - typical value for soft tissue
             
-            # Get ROI data and reshape if needed
-            roi_data = self.data_3d_roi_unnormal[:,:,0]  # Get first frame
+            # Get ROI data
+            roi_data = self.data_3d_roi_unnormal  # Full 3D array
+            n_lines, n_samples, n_frames = roi_data.shape
             
             # Get depth array
             depth_cm = self.full_depth_cm_roi
@@ -928,78 +894,115 @@ class SingleSampleData:
             logging.info(f"Speed of sound: {speed_of_sound} m/s")
             logging.info(f"ROI data shape: {roi_data.shape}")
             
-            # Process each line in the ROI data
+            # Initialize 3D array for corrected data
             corrected_data = np.zeros_like(roi_data)
             
-            for line_idx in range(roi_data.shape[0]):
-                # Get current line
-                signal = roi_data[line_idx, :]
-                
-                # Compute STFT
-                f, t, Zxx = stft(signal, 
-                               fs=self.sampling_frequency,
-                               window=window,
-                               nperseg=nperseg,
-                               noverlap=noverlap)
-                
-                # Convert frequency to MHz
-                f_MHz = f / 1e6
-                
-                # Use the actual depth values for attenuation correction
-                # Interpolate depth array to match STFT time points if needed
-                if len(t) != len(depth_cm):
-                    depth_line = np.interp(
-                        np.linspace(0, 1, len(t)),  # New points
-                        np.linspace(0, 1, len(depth_cm)),  # Original points
-                        depth_cm  # Original values
+            # Process each frame
+            for frame_idx in range(n_frames):
+                # Process each line in the current frame
+                for line_idx in range(n_lines):
+                    # Get current line from current frame
+                    signal = roi_data[line_idx, :, frame_idx]
+                    
+                    # Compute STFT
+                    f, t, Zxx = stft(signal, 
+                                   fs=self.sampling_frequency,
+                                   window=window,
+                                   nperseg=nperseg,
+                                   noverlap=noverlap)
+                    
+                    # Convert frequency to MHz
+                    f_MHz = f / 1e6
+                    
+                    # Create depth array for STFT time points
+                    depth_line = np.linspace(depth_cm[0], depth_cm[-1], len(t))
+                    
+                    # Calculate attenuation factors
+                    attenuation_factors = np.exp(
+                        -alpha * np.abs(f_MHz[:, None]) * depth_line[None, :] / (20 * np.log10(math.e))
                     )
-                else:
-                    depth_line = depth_cm
-                
-                # Calculate attenuation factors
-                attenuation_factors = np.exp(
-                    -alpha * np.abs(f_MHz[:, None]) * depth_line[None, :] / (20 * np.log10(math.e))
-                )
-                
-                # Calculate deattenuation factors
-                deattenuation_factors = 1 / attenuation_factors
-                
-                # Apply deattenuation correction
-                corrected_Zxx = Zxx * deattenuation_factors
-                
-                # Reconstruct signal using ISTFT
-                _, corrected_signal = istft(corrected_Zxx,
-                                         fs=self.sampling_frequency,
-                                         window='hann',
-                                         nperseg=64,
-                                         noverlap=32)
-                
-                # Trim signal to match original size
-                trim_size = (len(corrected_signal) - len(signal)) // 2
-                corrected_signal = corrected_signal[trim_size:len(corrected_signal) - trim_size]
-                
-                # Store corrected signal
-                corrected_data[line_idx, :] = corrected_signal
-                
-                if line_idx % 10 == 0:  # Log progress every 10 lines
-                    logging.info(f"Processed {line_idx}/{roi_data.shape[0]} lines")
-            
+                    
+                    # Calculate deattenuation factors
+                    deattenuation_factors = 1 / attenuation_factors
+                    
+                    # Apply deattenuation correction
+                    corrected_Zxx = Zxx * deattenuation_factors
+                    
+                    # Reconstruct signal using ISTFT
+                    _, corrected_signal = istft(corrected_Zxx,
+                                             fs=self.sampling_frequency,
+                                             window=window,
+                                             nperseg=nperseg,
+                                             noverlap=noverlap)
+                    
+                    # Ensure corrected signal matches original signal length
+                    if len(corrected_signal) > n_samples:
+                        # Trim excess samples
+                        trim_size = (len(corrected_signal) - n_samples) // 2
+                        corrected_signal = corrected_signal[trim_size:trim_size + n_samples]
+                    elif len(corrected_signal) < n_samples:
+                        # Pad with zeros if needed
+                        pad_size = (n_samples - len(corrected_signal)) // 2
+                        corrected_signal = np.pad(corrected_signal, (pad_size, n_samples - len(corrected_signal) - pad_size))
+                    
+                    # Store corrected signal in 3D array
+                    corrected_data[line_idx, :, frame_idx] = corrected_signal
+                    
             # Update the ROI data with corrected data
-            self.data_3d_roi_unnormal_ac_fix_alpha = corrected_data[:,:,np.newaxis]  # Add frame dimension
+            self.data_3d_roi_unnormal_ac_fix_alpha = corrected_data
             
             logging.info("Completed attenuation correction")
             logging.info(f"Corrected data shape: {self.data_3d_roi_unnormal_ac_fix_alpha.shape}")
             
-            # Optional: Visualize a sample line before and after correction
+            # Optional: Visualize a sample line from the middle frame before and after correction
             if visualize:
-                visualize_correction_example(roi_data[roi_data.shape[0]//2, :],
-                                                corrected_data[corrected_data.shape[0]//2, :],
-                                                depth_cm)
+                mid_frame = n_frames // 2
+                self.visualize_correction_example(
+                    roi_data[n_lines//2, :, mid_frame],
+                    corrected_data[n_lines//2, :, mid_frame],
+                    depth_cm
+                )
             
         except Exception as e:
             logging.error(f"Error in attenuation correction: {str(e)}")
             raise
             
+    def visualize_correction_example(self, original_signal: np.ndarray, corrected_signal: np.ndarray, depth_cm: np.ndarray):
+        """
+        Visualize example of signal before and after attenuation correction.
+        
+        Args:
+            original_signal (np.ndarray): Original signal
+            corrected_signal (np.ndarray): Corrected signal
+            depth_cm (np.ndarray): Depth array in cm
+        """
+        try:
+            plt.figure(figsize=(12, 6))
+            
+            # Plot original signal
+            plt.subplot(2, 1, 1)
+            plt.plot(depth_cm, original_signal)
+            plt.title('Original Signal')
+            plt.xlabel('Depth (cm)')
+            plt.ylabel('Amplitude')
+            plt.grid(True)
+            
+            # Plot corrected signal
+            plt.subplot(2, 1, 2)
+            plt.plot(depth_cm, corrected_signal)
+            plt.title('Attenuation Corrected Signal')
+            plt.xlabel('Depth (cm)')
+            plt.ylabel('Amplitude')
+            plt.grid(True)
+            
+            plt.tight_layout()
+            plt.show()
+            
+            logging.info("Visualized correction example")
+            
+        except Exception as e:
+            logging.error(f"Error visualizing correction: {str(e)}")
+
     def set_ac_signal_with_calculated_alpha(self,
                                       window: str = 'hann',
                                       nperseg: int = 64,
@@ -1008,7 +1011,7 @@ class SingleSampleData:
         """
         Set the AC signal with calculated alpha by applying attenuation correction to the ROI data.
         This method calculates the attenuation coefficient at the central frequency (2.5 MHz)
-        and applies the correction across all frequencies.
+        and applies the correction across all frequencies for each frame in the 3D data.
         
         Args:
             window (str): Window function to use for STFT
@@ -1021,8 +1024,9 @@ class SingleSampleData:
             speed_of_sound = 1540  # m/s - typical value for soft tissue
             center_freq = 2.5e6  # Central frequency in Hz (2.5 MHz)
             
-            # Get ROI data and reshape if needed
-            roi_data = self.data_3d_roi_unnormal[:,:,0]  # Get first frame
+            # Get ROI data
+            roi_data = self.data_3d_roi_unnormal  # Full 3D array
+            n_lines, n_samples, n_frames = roi_data.shape
             
             # Get depth array directly from ROI
             depth_cm = self.full_depth_cm_roi
@@ -1032,160 +1036,106 @@ class SingleSampleData:
             logging.info(f"Speed of sound: {speed_of_sound} m/s")
             logging.info(f"ROI data shape: {roi_data.shape}")
             
-            # Process each line in the ROI data
+            # Initialize 3D array for corrected data
             corrected_data = np.zeros_like(roi_data)
             
-            for line_idx in range(roi_data.shape[0]):
-                # Get current line
-                signal = roi_data[line_idx, :]
-                
-                # Compute STFT
-                f, t, Zxx = stft(signal, 
-                               fs=self.sampling_frequency,
-                               window=window,
-                               nperseg=nperseg,
-                               noverlap=noverlap)
-                
-                # Convert frequency to MHz
-                f_MHz = f / 1e6
-                
-                # Find index of frequency closest to 2.5 MHz
-                center_freq_idx = np.argmin(np.abs(f - center_freq))
-                center_freq_actual = f[center_freq_idx]
-                
-                logging.debug(f"Using frequency {center_freq_actual/1e6:.2f} MHz (closest to 2.5 MHz)")
-                
-                # Create depth array for STFT time points if needed
-                if len(t) != len(depth_cm):
-                    depth_line = np.interp(
-                        np.linspace(0, 1, len(t)),  # New points
-                        np.linspace(0, 1, len(depth_cm)),  # Original points
-                        depth_cm  # Original values
+            # Process each frame
+            for frame_idx in range(n_frames):
+                # Process each line in the current frame
+                for line_idx in range(n_lines):
+                    # Get current line from current frame
+                    signal = roi_data[line_idx, :, frame_idx]
+                    
+                    # Compute STFT
+                    f, t, Zxx = stft(signal, 
+                                   fs=self.sampling_frequency,
+                                   window=window,
+                                   nperseg=nperseg,
+                                   noverlap=noverlap)
+                    
+                    # Convert frequency to MHz
+                    f_MHz = f / 1e6
+                    
+                    # Find index of frequency closest to 2.5 MHz
+                    center_freq_idx = np.argmin(np.abs(f - center_freq))
+                    center_freq_actual = f[center_freq_idx]
+                    
+                    # Create depth array for STFT time points
+                    depth_line = np.linspace(depth_cm[0], depth_cm[-1], len(t))
+                    
+                    # Create a filtered version of Zxx that retains only the central frequency
+                    filtered_Zxx = np.zeros_like(Zxx)
+                    filtered_Zxx[center_freq_idx] = Zxx[center_freq_idx]
+                    
+                    # Reconstruct the time-domain signal for the central frequency
+                    _, time_domain_signal = istft(filtered_Zxx,
+                                               fs=self.sampling_frequency,
+                                               window=window,
+                                               nperseg=nperseg,
+                                               noverlap=noverlap)
+                    
+                    # Ensure time_domain_signal matches depth_line length
+                    if len(time_domain_signal) > len(depth_line):
+                        trim_size = (len(time_domain_signal) - len(depth_line)) // 2
+                        time_domain_signal = time_domain_signal[trim_size:trim_size + len(depth_line)]
+                    elif len(time_domain_signal) < len(depth_line):
+                        # Pad or interpolate if needed
+                        time_domain_signal = np.interp(
+                            np.linspace(0, 1, len(depth_line)),
+                            np.linspace(0, 1, len(time_domain_signal)),
+                            time_domain_signal
+                        )
+                    
+                    # Calculate the logarithmic slope for alpha at central frequency
+                    log_amplitude = np.log(np.abs(time_domain_signal) + 1e-10)
+                    slope, intercept, _, _, _ = linregress(depth_line, log_amplitude)
+                    mu = -slope  # Negate slope to represent attenuation
+                    
+                    # Calculate attenuation factors using the single mu value
+                    attenuation_factors = np.exp(
+                        -mu * np.abs(f_MHz[:, None]) * depth_line[None, :] / (20 * np.log10(math.e))
                     )
-                else:
-                    depth_line = depth_cm
-                
-                # Create a filtered version of Zxx that retains only the central frequency
-                filtered_Zxx = np.zeros_like(Zxx)
-                filtered_Zxx[center_freq_idx] = Zxx[center_freq_idx]
-                
-                # Reconstruct the time-domain signal for the central frequency
-                _, time_domain_signal = istft(filtered_Zxx,
-                                           fs=self.sampling_frequency,
-                                           window=window,
-                                           nperseg=nperseg,
-                                           noverlap=noverlap)
-                
-                # Ensure time_domain_signal matches depth_line length
-                if len(time_domain_signal) > len(depth_line):
-                    trim_size = (len(time_domain_signal) - len(depth_line)) // 2
-                    time_domain_signal = time_domain_signal[trim_size:trim_size + len(depth_line)]
-                elif len(time_domain_signal) < len(depth_line):
-                    # Pad or interpolate if needed
-                    time_domain_signal = np.interp(
-                        np.linspace(0, 1, len(depth_line)),
-                        np.linspace(0, 1, len(time_domain_signal)),
-                        time_domain_signal
-                    )
-                
-                # Calculate the logarithmic slope for alpha at central frequency
-                log_amplitude = np.log(np.abs(time_domain_signal) + 1e-10)
-                slope, intercept, _, _, _ = linregress(depth_line, log_amplitude)
-                mu = -slope  # Negate slope to represent attenuation
-                
-                if visualize and line_idx == roi_data.shape[0]//2:  # Only visualize middle line
-                    # Plot log amplitude vs depth for central frequency
-                    plt.figure(figsize=(10, 4))
-                    plt.plot(depth_line, log_amplitude, label=f'Frequency: {center_freq_actual/1e6:.2f} MHz')
-                    regression_line = slope * depth_line + intercept
-                    plt.plot(depth_line, regression_line, '--r', label=f'Regression Line (mu={mu:.2f} dB/cm)')
-                    plt.title(f'Log Amplitude vs Depth at {center_freq_actual/1e6:.2f} MHz')
-                    plt.xlabel('Depth (cm)')
-                    plt.ylabel('Log Amplitude')
-                    plt.grid(True)
-                    plt.legend()
-                    plt.show()
-                
-                # Calculate attenuation factors using the single mu value
-                attenuation_factors = np.exp(
-                    -mu * np.abs(f_MHz[:, None]) * depth_line[None, :] / (20 * np.log10(math.e))
-                )
-                
-                # Calculate deattenuation factors
-                deattenuation_factors = 1 / attenuation_factors
-                
-                # Apply deattenuation correction
-                corrected_Zxx = Zxx * deattenuation_factors
-                
-                # Reconstruct signal using ISTFT
-                _, corrected_signal = istft(corrected_Zxx,
-                                         fs=self.sampling_frequency,
-                                         window=window,
-                                         nperseg=nperseg,
-                                         noverlap=noverlap)
-                
-                # Ensure corrected signal matches original signal length
-                if len(corrected_signal) > len(signal):
-                    trim_size = (len(corrected_signal) - len(signal)) // 2
-                    corrected_signal = corrected_signal[trim_size:trim_size + len(signal)]
-                elif len(corrected_signal) < len(signal):
-                    # Pad or interpolate if needed
-                    corrected_signal = np.interp(
-                        np.linspace(0, 1, len(signal)),
-                        np.linspace(0, 1, len(corrected_signal)),
-                        corrected_signal
-                    )
-                
-                # Store corrected signal
-                corrected_data[line_idx, :] = corrected_signal
-                
-                if line_idx % 10 == 0:  # Log progress every 10 lines
-                    logging.info(f"Processed {line_idx}/{roi_data.shape[0]} lines")
-                
-                # Visualize STFT and signals for middle line
-                if visualize and line_idx == roi_data.shape[0]//2:
-                    plt.figure(figsize=(12, 10))
                     
-                    # Plot original STFT magnitude
-                    plt.subplot(4, 1, 1)
-                    plt.title('STFT Magnitude of Original Signal')
-                    plt.pcolormesh(depth_line, f_MHz, np.log(np.abs(Zxx) + 1e-10), shading='gouraud')
-                    plt.ylabel('Frequency (MHz)')
-                    plt.colorbar(label='Magnitude')
-                    plt.axhline(y=center_freq_actual/1e6, color='r', linestyle='--', 
-                              label=f'Central Frequency ({center_freq_actual/1e6:.2f} MHz)')
-                    plt.legend()
+                    # Calculate deattenuation factors
+                    deattenuation_factors = 1 / attenuation_factors
                     
-                    # Plot corrected STFT magnitude
-                    plt.subplot(4, 1, 2)
-                    plt.title('STFT Magnitude of Corrected Signal')
-                    plt.pcolormesh(depth_line, f_MHz, np.log(np.abs(corrected_Zxx) + 1e-10), shading='gouraud')
-                    plt.ylabel('Frequency (MHz)')
-                    plt.colorbar(label='Magnitude')
-                    plt.axhline(y=center_freq_actual/1e6, color='r', linestyle='--')
+                    # Apply deattenuation correction
+                    corrected_Zxx = Zxx * deattenuation_factors
                     
-                    # Plot original signal
-                    plt.subplot(4, 1, 3)
-                    plt.title('Original Signal')
-                    plt.plot(depth_cm, signal)
-                    plt.xlabel('Depth (cm)')
-                    plt.grid(True)
+                    # Reconstruct signal using ISTFT
+                    _, corrected_signal = istft(corrected_Zxx,
+                                             fs=self.sampling_frequency,
+                                             window=window,
+                                             nperseg=nperseg,
+                                             noverlap=noverlap)
                     
-                    # Plot corrected signal
-                    plt.subplot(4, 1, 4)
-                    plt.title(f'Corrected Signal (mu={mu:.2f} dB/cm)')
-                    plt.plot(depth_cm, corrected_signal)
-                    plt.xlabel('Depth (cm)')
-                    plt.grid(True)
+                    # Ensure corrected signal matches original signal length
+                    if len(corrected_signal) > n_samples:
+                        # Trim excess samples
+                        trim_size = (len(corrected_signal) - n_samples) // 2
+                        corrected_signal = corrected_signal[trim_size:trim_size + n_samples]
+                    elif len(corrected_signal) < n_samples:
+                        # Pad with zeros if needed
+                        pad_size = (n_samples - len(corrected_signal)) // 2
+                        corrected_signal = np.pad(corrected_signal, (pad_size, n_samples - len(corrected_signal) - pad_size))
                     
-                    plt.tight_layout()
-                    plt.show()
+                    # Store corrected signal in 3D array
+                    corrected_data[line_idx, :, frame_idx] = corrected_signal
             
             # Update the ROI data with corrected data
-            self.data_3d_roi_unnormal_ac_calculated_alpha = corrected_data[:,:,np.newaxis]  # Add frame dimension
+            self.data_3d_roi_unnormal_ac_calculated_alpha = corrected_data
             
             logging.info("Completed attenuation correction")
             logging.info(f"Corrected data shape: {self.data_3d_roi_unnormal_ac_calculated_alpha.shape}")
+            
+            # Optional: Visualize a sample line from the middle frame before and after correction
+            if visualize:
+                mid_frame = n_frames // 2
+                self.visualize_correction_example(
+                    roi_data[n_lines//2, :, mid_frame],
+                    corrected_data[n_lines//2, :, mid_frame],
+                    depth_cm
+                )
             
         except Exception as e:
             logging.error(f"Error in attenuation correction: {str(e)}")
@@ -1221,18 +1171,36 @@ class BSCSingleSample:
         # Run the BSC calculation
         self.__run()
         
+
     def __run(self):       
 
         if self.normalization_method == "normalized_with_phantom":
-            self.calculate_bsc(roi_data=self.single_sample_object.data_3d_roi_unnormal[:,:,0],
-                                          phantom_data=self.single_sample_object.data_3d_phantom_roi[:,:,0],
-                                          window_depth_cm=self.single_sample_object.full_depth_cm_roi)
+            # Calculate BSC for tissue data
+            self.energy_dict, self.frequencies = self.calculate_bsc_3d(self.single_sample_object.data_3d_roi_unnormal)
             
+            # Calculate BSC for phantom data (using first frame)
+            phantom_data_2d = self.single_sample_object.data_3d_phantom_roi[:,:,0]  # Take first frame
+            self.energy_dict_phantom, _ = self.calculate_bsc_2d(phantom_data_2d)
+            
+            # Normalize using phantom reference
+            self.energy_dict = self.normalize_3d_with_2d(
+                energy_dict_3d=self.energy_dict,
+                energy_dict_2d=self.energy_dict_phantom
+            )
+
         elif self.normalization_method == "normalized_with_healthy_liver":
-            self.calculate_bsc(roi_data=self.single_sample_object.data_3d_roi_unnormal[:,:,0],
-                                          phantom_data=self.single_sample_object.data_3d_roi_normal[:,:,0],
-                                          window_depth_cm=self.single_sample_object.full_depth_cm_roi)
+            # Calculate BSC for abnormal tissue data
+            self.energy_dict, self.frequencies = self.calculate_bsc_3d(self.single_sample_object.data_3d_roi_unnormal)
             
+            # Calculate BSC for normal tissue data (using first frame)
+            normal_data_2d = self.single_sample_object.data_3d_roi_normal[:,:,0]  # Take first frame
+            self.energy_dict_normal, _ = self.calculate_bsc_2d(normal_data_2d)
+            
+            # Normalize using normal tissue reference
+            self.energy_dict = self.normalize_3d_with_2d(
+                energy_dict_3d=self.energy_dict,
+                energy_dict_2d=self.energy_dict_normal
+            )
             
         elif self.normalization_method == "normalized_with_constant_alpha":
             self.single_sample_object.set_ac_signal_with_constant_alpha(alpha=self.alpha,
@@ -1240,15 +1208,8 @@ class BSCSingleSample:
                                                                         nperseg=self.nperseg,
                                                                         noverlap=self.noverlap,
                                                                         visualize=False)
-            
-            # Get 2D data from 3D array
-            ac_data = self.single_sample_object.data_3d_roi_unnormal_ac_fix_alpha
-            if len(ac_data.shape) == 3:
-                ac_data = ac_data[:,:,0]
-            
-            self.calculate_bsc(roi_data=ac_data,
-                                window_depth_cm=self.single_sample_object.full_depth_cm_roi,
-                                use_phantom=False)
+                        
+            self.energy_dict, self.frequencies = self.calculate_bsc_3d(self.single_sample_object.data_3d_roi_unnormal_ac_fix_alpha)
             
         elif self.normalization_method == "normalized_with_calculated_alpha":
             self.single_sample_object.set_ac_signal_with_calculated_alpha(
@@ -1258,182 +1219,195 @@ class BSCSingleSample:
                 visualize=False
             )
             
-            # Get 2D data from 3D array
-            ac_data = self.single_sample_object.data_3d_roi_unnormal_ac_calculated_alpha
-            if len(ac_data.shape) == 3:
-                ac_data = ac_data[:,:,0]
-            
-            self.calculate_bsc(roi_data=ac_data,
-                                window_depth_cm=self.single_sample_object.full_depth_cm_roi,
-                                use_phantom=False)
+            self.energy_dict, self.frequencies = self.calculate_bsc_3d(self.single_sample_object.data_3d_roi_unnormal_ac_calculated_alpha)
             
         else:
             raise ValueError(f"Invalid normalization method: {self.normalization_method}")
             
-    def calculate_bsc(self,
-                   roi_data: np.ndarray,
-                   phantom_data: Optional[np.ndarray] = None,
-                   window_depth_cm: np.ndarray = None,
-                   use_phantom: bool = True) -> float:
+    def calculate_bsc_3d(self,
+                   roi_data_3d: np.ndarray):
+            """
+            Calculate the backscatter coefficient (BSC) using the reference phantom method with STFT-based power spectra.
+            Computes signal energy at each frequency for each position in the 3D ROI data.
+            
+            Args:
+                roi_data_3d (np.ndarray): Input RF data array (3D) with shape (lines, samples, frames)
+            
+            Returns:
+                Tuple[Dict[float, np.ndarray], np.ndarray]: A tuple containing:
+                    - Dictionary mapping frequencies (in MHz) to their corresponding
+                      3D energy arrays with shape (lines, time_points, frames)
+                    - Array of frequency values in MHz
+            """
+            center_frequency = self.center_frequency
+            sampling_frequency = self.sampling_frequency
+                    
+            # stft parameters
+            window = self.window
+            nperseg = self.nperseg
+            noverlap = self.noverlap
+            
+            logging.info(f"Center frequency: {center_frequency/1e6:.1f} MHz")
+            logging.info(f"STFT parameters - Window: {window}, Segment length: {nperseg}, Overlap: {noverlap}")
+            
+            n_lines, n_samples, n_frames = roi_data_3d.shape
+            logging.info(f"Computing energy spectrum for 3D data with shape: {roi_data_3d.shape}")
+            
+            # First compute STFT for one line to get frequency array and time points
+            # Use the first line of the first frame as reference
+            f, t, Zxx_ref = stft(roi_data_3d[0, :, 0], 
+                                fs=sampling_frequency, 
+                                window=window,
+                                nperseg=nperseg, 
+                                noverlap=noverlap)
+            
+            n_freqs = len(f)
+            n_times = Zxx_ref.shape[1]  # Use actual time points from STFT output
+            
+            logging.info(f"STFT output dimensions - Frequencies: {n_freqs}, Time points: {n_times}")
+            
+            # Initialize dictionary to store frequency-energy mappings
+            energy_dict = {}
+            
+            # For each frequency, create an energy array with STFT dimensions
+            for freq_idx in range(n_freqs):
+                current_freq = f[freq_idx] / 1e6  # Convert to MHz
+                
+                # Initialize energy array for this frequency with STFT dimensions and frames
+                energy_array = np.zeros((n_lines, n_times, n_frames), dtype=float)
+                
+                # Process each line
+                for line_idx in range(n_lines):
+                    # Process each frame
+                    for frame_idx in range(n_frames):
+                        # Compute STFT for this line and frame
+                        _, _, Zxx = stft(roi_data_3d[line_idx, :, frame_idx],
+                                       fs=sampling_frequency,
+                                       window=window,
+                                       nperseg=nperseg,
+                                       noverlap=noverlap)
+                        
+                        # Extract power at current frequency for all time points
+                        energy_array[line_idx, :, frame_idx] = np.abs(Zxx[freq_idx, :])**2
+                
+                # Add energy array to dictionary with frequency as key
+                energy_dict[current_freq] = energy_array
+                logging.info(f"Completed energy calculation for frequency {current_freq:.2f} MHz")
+            
+            logging.info(f"Completed energy computation for all frequencies")
+            logging.info(f"Number of frequency bands: {len(energy_dict)}")
+            logging.info(f"Each energy array shape: {next(iter(energy_dict.values())).shape}")
+            
+            # Return results instead of storing as class attributes
+            return energy_dict, f / 1e6  # Return dictionary and frequency values in MHz
+            
+    def calculate_bsc_2d(self,
+                        roi_data_2d: np.ndarray):
         """
         Calculate the backscatter coefficient (BSC) using the reference phantom method with STFT-based power spectra.
-        This method uses Short-Time Fourier Transform for spectral analysis instead of traditional windowing.
-        Can operate in two modes: with phantom normalization or without phantom normalization.
+        Computes signal energy at each frequency for each position in the 2D ROI data.
         
         Args:
-            roi_data (np.ndarray): ROI data array (2D or 3D)
-            phantom_data (Optional[np.ndarray]): Phantom data array (2D or 3D). Required if use_phantom=True
-            window_depth_cm (np.ndarray): Array of depth values in cm
-            use_phantom (bool): Whether to use phantom data for normalization. Defaults to True.
-            
+            roi_data_2d (np.ndarray): Input RF data array (2D) with shape (lines, samples)
+        
         Returns:
-            float: Backscatter coefficient of the ROI (1/cm-sr)
+            Tuple[Dict[float, np.ndarray], np.ndarray]: A tuple containing:
+                - Dictionary mapping frequencies to their corresponding
+                  2D energy arrays with shape (lines, time_points)
+                - Array of frequency values in MHz
         """
         center_frequency = self.center_frequency
-        sampling_frequency=self.sampling_frequency
+        sampling_frequency = self.sampling_frequency
                 
         # stft parameters
         window = self.window
         nperseg = self.nperseg
         noverlap = self.noverlap
         
-        analysis_method = "with phantom" if use_phantom else "without phantom"
-        logging.info(f"Starting BSC calculation {analysis_method} using HybridEcho method")
         logging.info(f"Center frequency: {center_frequency/1e6:.1f} MHz")
         logging.info(f"STFT parameters - Window: {window}, Segment length: {nperseg}, Overlap: {noverlap}")
         
-        def compute_stft_power_spec(rf_data: np.ndarray,
-                                  sampling_frequency: float) -> Tuple[np.ndarray, np.ndarray]:
-            """
-            Compute the power spectrum using STFT.
+        n_lines, n_samples = roi_data_2d.shape
+        logging.info(f"Computing energy spectrum for 2D data with shape: {roi_data_2d.shape}")
+        
+        # First compute STFT for one line to get frequency array and time points
+        # Use the first line as reference
+        f, t, Zxx_ref = stft(roi_data_2d[0, :], 
+                            fs=sampling_frequency, 
+                            window=window,
+                            nperseg=nperseg, 
+                            noverlap=noverlap)
+        
+        n_freqs = len(f)
+        n_times = Zxx_ref.shape[1]  # Use actual time points from STFT output
+        
+        logging.info(f"STFT output dimensions - Frequencies: {n_freqs}, Time points: {n_times}")
+        
+        # Initialize dictionary to store frequency-energy mappings
+        energy_dict = {}
+        
+        # For each frequency, create an energy array with STFT dimensions
+        for freq_idx in range(n_freqs):
+            current_freq = f[freq_idx] / 1e6  # Convert to MHz
             
-            Args:
-                rf_data (np.ndarray): Input RF data array (2D or 3D)
-                sampling_frequency (float): Sampling frequency
+            # Initialize energy array for this frequency with STFT dimensions
+            energy_array = np.zeros((n_lines, n_times), dtype=float)
+            
+            # Process each line
+            for line_idx in range(n_lines):
+                # Compute STFT for this line
+                _, _, Zxx = stft(roi_data_2d[line_idx, :],
+                               fs=sampling_frequency,
+                               window=window,
+                               nperseg=nperseg,
+                               noverlap=noverlap)
                 
-            Returns:
-                Tuple[np.ndarray, np.ndarray]: Frequencies and averaged power spectrum
-            """
-            # Ensure input is 2D
-            if len(rf_data.shape) == 3:
-                rf_data = rf_data[:,:,0]  # Take first frame if 3D
+                # Extract power at current frequency for all time points
+                energy_array[line_idx, :] = np.abs(Zxx[freq_idx, :])**2
             
-            logging.debug(f"Computing STFT power spectrum for data shape: {rf_data.shape}")
-            
-            # Initialize array to store power spectra for each line
-            power_spectra = []
-            
-            # Process each line in the data
-            logging.info(f"Processing {rf_data.shape[0]} lines with STFT")
-            for line_idx in range(rf_data.shape[0]):
-                # Compute STFT for the current line
-                f, t, Zxx = stft(rf_data[line_idx], fs=sampling_frequency, window=window,
-                               nperseg=nperseg, noverlap=noverlap)
-                
-                # Calculate power spectrum for this line
-                ps_line = np.mean(np.abs(Zxx)**2, axis=1)
-                power_spectra.append(ps_line)
-            
-            # Convert list to numpy array and average across all lines
-            power_spectra = np.array(power_spectra)  # Shape: (n_lines, n_frequencies)
-            
-            logging.info(f"Completed STFT analysis for all lines")
-            logging.info(f"Computed power spectrum with shape - Input: {rf_data.shape}, Output: {power_spectra.shape}")
-            
-            return f, power_spectra
+            # Add energy array to dictionary with frequency as key
+            energy_dict[current_freq] = energy_array
+            logging.info(f"Completed energy calculation for frequency {current_freq:.2f} MHz")
+        
+        logging.info(f"Completed energy computation for all frequencies")
+        logging.info(f"Number of frequency bands: {len(energy_dict)}")
+        logging.info(f"Each energy array shape: {next(iter(energy_dict.values())).shape}")
+        
+        # Convert frequencies to MHz
+        frequencies_mhz = f / 1e6
+        
+        # Return results
+        return energy_dict, frequencies_mhz  # Return dictionary and frequency values in MHz
 
-        def plot_power_spectra(f: np.ndarray, ps: np.ndarray, window_depth_cm: np.ndarray, label: str):
-            """
-            Plot power spectrum based on depth and frequency.
+    def normalize_3d_with_2d(self, energy_dict_3d: dict, energy_dict_2d: dict) -> dict:
+        """
+        Normalize a 3D energy dictionary using a 2D energy dictionary.
+        Each frame in the 3D data is normalized using the same 2D reference data.
+        
+        Args:
+            energy_dict_3d (dict): Dictionary mapping frequencies to 3D energy arrays (lines, time_points, frames)
+            energy_dict_2d (dict): Dictionary mapping frequencies to 2D energy arrays (lines, time_points)
             
-            Args:
-                f (np.ndarray): Frequency array
-                ps (np.ndarray): Power spectrum data
-                window_depth_cm (np.ndarray): Depth values in cm
-            """
-            try:
-                # Create depth array matching the number of lines in power spectra
-                depths = np.linspace(window_depth_cm[0], window_depth_cm[-1], ps.shape[0])
+        Returns:
+            dict: Normalized 3D energy dictionary
+        """
+        normalized_dict = {}
+        
+        for freq in energy_dict_3d.keys():
+            if freq in energy_dict_2d:               
+                # Add a new axis for frames to enable broadcasting
+                data_2d_expanded = energy_dict_2d[freq][..., np.newaxis]
                 
-                # Convert frequency to MHz for better visualization
-                freq_mhz = f / 1e6
-                
-                # Create figure
-                plt.figure(figsize=(8, 6))
-                
-                # Plot power spectrum with swapped axes
-                plt.pcolormesh(depths, freq_mhz, ps.T, shading='auto', cmap='viridis')
-                plt.colorbar(label='Power (dB)')
-                plt.title(f'Power Spectrum {label}')
-                plt.xlabel('Depth (cm)')
-                plt.ylabel('Frequency (MHz)')
-                
-                plt.tight_layout()
-                plt.show()
-                
-                logging.info("Successfully plotted power spectrum")
-                
-            except Exception as e:
-                logging.error(f"Error plotting power spectrum: {str(e)}")
-                
-        try:
-            # Validate inputs
-            if use_phantom and phantom_data is None:
-                raise ValueError("phantom_data is required when use_phantom=True")
-
-            # Log input shapes
-            logging.info(f"Input ROI data shape: {roi_data.shape}")
-            if use_phantom:
-                logging.info(f"Input phantom data shape: {phantom_data.shape}")
-
-            # Calculate power spectra using STFT
-            logging.info("Calculating power spectra using STFT")
-            f, ps_sample = compute_stft_power_spec(
-                roi_data, sampling_frequency
-            )
-            ps_sample = 20 * np.log10(ps_sample)
-            
-            if use_phantom:
-                _, ps_phantom = compute_stft_power_spec(
-                    phantom_data, sampling_frequency
-                )
-                ps_phantom = 20 * np.log10(ps_phantom)
-                
-                # Calculate signal ratio
-                power_ratio_2d = ps_sample / ps_phantom  # Element-wise ratio
-                logging.info(f"Central frequency power ratio shape: {power_ratio_2d.shape}")
-                
-                # Print shapes for debugging
-                logging.info(f"Shape of f: {f.shape}")
-                logging.info(f"Shape of ps_sample: {ps_sample.shape}")
-                logging.info(f"Shape of ps_phantom: {ps_phantom.shape}")
+                # Normalize all frames using broadcasting
+                normalized_dict[freq] = energy_dict_3d[freq] / data_2d_expanded
             else:
-                # Use sample power spectrum directly when not using phantom
-                power_ratio_2d = ps_sample
-                logging.info(f"Power spectrum shape: {power_ratio_2d.shape}")
+                logging.warning(f"Frequency {freq:.2f} MHz not found in reference data")
                 
-                # Print shapes for debugging
-                logging.info(f"Shape of f: {f.shape}")
-                logging.info(f"Shape of ps_sample: {ps_sample.shape}")
+        return normalized_dict
+
             
-            logging.info("Power spectra calculation completed")
-                          
-            # plot results
-            #plot_power_spectra(f, power_ratio_2d, window_depth_cm, label="Power Ratio")
-            #plot_power_spectra(f, ps_sample, window_depth_cm, label="ROI")
-            #plot_power_spectra(f, ps_phantom, window_depth_cm, label="Phantom")
-            
-            # compatible depth with bsc
-            compatible_depth_with_bsc = np.linspace(window_depth_cm[0], window_depth_cm[-1], power_ratio_2d.shape[0])
-            
-            # set data
-            self.power_ratio_2d = power_ratio_2d
-            self.f = f
-            self.depth_cm = compatible_depth_with_bsc
-           
-        except Exception as e:
-            logging.error(f"Error calculating BSC with HybridEcho method: {str(e)}")
-            return None
+
+
     
  
 
@@ -1468,7 +1442,9 @@ class BSC:
         
     def save_bsc_results_as_csv(self, bsc_obj):
         """
-        Save BSC results to CSV files in a matching folder structure.
+        Save BSC energy results to separate Excel files for each frequency.
+        Each Excel file will contain frame-by-frame information for that frequency.
+        Time points are rows and lines are columns in the output.
         
         Args:
             bsc_obj: BSC object containing results to save
@@ -1483,21 +1459,36 @@ class BSC:
             
             logging.info(f"Saving BSC results for sample {sample_name} to {result_dir}")
             
-            # Save power ratio data with 6 decimal places
-            power_ratio_path = result_dir / "power_ratio.csv"
-            np.savetxt(power_ratio_path, bsc_obj.power_ratio_2d, delimiter=',', fmt='%.6f')
-            logging.info(f"Saved power ratio data to {power_ratio_path}")
+            # Get the energy dictionary and frequencies
+            energy_dict = bsc_obj.energy_dict
+            frequencies = bsc_obj.frequencies
             
-            # Save frequency data in MHz with 3 decimal places
-            freq_path = result_dir / "frequencies_MHz.csv"
-            freq_mhz = bsc_obj.f / 1e6  # Convert to MHz
-            np.savetxt(freq_path, freq_mhz, delimiter=',', fmt='%.3f')
-            logging.info(f"Saved frequency data to {freq_path}")
-            
-            # Save depth data with 3 decimal places
-            depth_path = result_dir / "depths_cm.csv"
-            np.savetxt(depth_path, bsc_obj.depth_cm, delimiter=',', fmt='%.3f')
-            logging.info(f"Saved depth data to {depth_path}")
+            # For each frequency, create a separate Excel file
+            for freq in frequencies:
+                # Get the energy data for this frequency
+                energy_data = energy_dict[freq]  # Shape: (lines, time_points, frames)
+                n_lines, n_time_points, n_frames = energy_data.shape
+                
+                # Create Excel writer for this frequency
+                freq_file = result_dir / f"frequency_{freq:.2f}MHz.xlsx"
+                with pd.ExcelWriter(freq_file, engine='openpyxl') as writer:
+                    # For each frame, create a separate sheet
+                    for frame_idx in range(n_frames):
+                        # Get frame data and transpose it
+                        frame_data = energy_data[:, :, frame_idx].T  # Transpose to make time_points rows and lines columns
+                        
+                        # Convert to DataFrame with transposed orientation
+                        df = pd.DataFrame(
+                            frame_data,
+                            index=[f"Time_{i+1}" for i in range(n_time_points)],
+                            columns=[f"Line_{i+1}" for i in range(n_lines)]
+                        )
+                        
+                        # Save to sheet
+                        sheet_name = f"Frame_{frame_idx+1}"
+                        df.to_excel(writer, sheet_name=sheet_name)
+                
+                logging.info(f"Saved energy data for frequency {freq:.2f} MHz to {freq_file}")
             
         except Exception as e:
             logging.error(f"Error saving BSC results: {str(e)}")
