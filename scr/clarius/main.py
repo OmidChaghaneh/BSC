@@ -436,17 +436,24 @@ class SingleSampleData:
     
     def __init__(self, 
                  sample_folder_path: Union[str, Path],
-                 roi_file_path: Union[str, Path]):
+                 roi_file_path: Union[str, Path],
+                 roi_size: str = 'large'):  # Add roi_size parameter with default value
         """
         Initialize the Data object with specified parameters.
         
         Args:
             sample_folder_path (Union[str, Path]): Path to the sample folder containing extracted data
             roi_file_path (Union[str, Path]): Path to the ROI Excel file
+            roi_size (str): Size of ROI to use, either 'large' or 'small'. Defaults to 'large'
         """
+        # Validate roi_size
+        if roi_size.lower() not in ['large', 'small']:
+            raise ValueError("roi_size must be either 'large' or 'small'")
+            
         # Convert paths to Path objects if string
         self.sample_folder_path = Path(sample_folder_path)
         self.roi_file_path = Path(roi_file_path)
+        self.roi_size = roi_size.lower()
         
         # C3 probe parameters
         self.device = 'C3'
@@ -512,22 +519,36 @@ class SingleSampleData:
         logging.info(f"Created depth array with range: {self.full_depth_cm.min():.2f} to {self.full_depth_cm.max():.2f} cm")
         
     def read_roi_data(self):
-        """Read ROI data from the specified Excel file."""
+        """Read ROI data from the specified Excel file and sheet based on roi_size."""
         try:
             if not self.roi_file_path.exists():
                 logging.warning(f"No ROI file found at: {self.roi_file_path}")
                 return
                 
-            logging.info(f"Loading ROI data from: {self.roi_file_path}")
+            # Select sheet based on roi_size
+            sheet_name = 'Large_ROI' if self.roi_size == 'large' else 'Small_ROI'
+            logging.info(f"Loading {sheet_name} from: {self.roi_file_path}")
             
-            # Read the Excel file
-            self.roi_data = pd.read_excel(self.roi_file_path)
-            logging.info(f"Loaded ROI data with shape: {self.roi_data.shape}")
+            try:
+                # Read the specific sheet from Excel file
+                self.roi_data = pd.read_excel(self.roi_file_path, sheet_name=sheet_name)
+                logging.info(f"Loaded ROI data with shape: {self.roi_data.shape}")
+            except ValueError as ve:
+                logging.error(f"Sheet '{sheet_name}' not found in {self.roi_file_path}")
+                # If specified sheet not found, try to read available sheets
+                available_sheets = pd.ExcelFile(self.roi_file_path).sheet_names
+                logging.info(f"Available sheets: {available_sheets}")
+                if available_sheets:
+                    # Use first available sheet as fallback
+                    logging.warning(f"Using first available sheet: {available_sheets[0]}")
+                    self.roi_data = pd.read_excel(self.roi_file_path, sheet_name=available_sheets[0])
+                else:
+                    raise ValueError(f"No valid sheets found in {self.roi_file_path}")
             
         except Exception as e:
             logging.error(f"Error reading ROI data: {str(e)}")
             raise
-            
+
     def read_extracted_folder(self):
         """Read numpy data files and delay samples from Excel files in the extracted folder."""
         try:
@@ -1422,12 +1443,14 @@ class BSC:
                  window: str,
                  nperseg: int,
                  noverlap: int,
-                 alpha: float):
+                 alpha: float,
+                 roi_size: str):
         
         self.samples_folder_path = samples_folder_path
         self.result_folder_path = result_folder_path
         self.roi_folder_path = roi_folder_path
         self.normalization_method = normalization_method
+        self.roi_size = roi_size
         
         # stft parameters
         self.window = window
@@ -1514,7 +1537,8 @@ class BSC:
                 # Create SingleSampleData object first
                 single_sample_data = SingleSampleData(
                     sample_folder_path=subfolder,
-                    roi_file_path=roi_file_path
+                    roi_file_path=roi_file_path,
+                    roi_size=self.roi_size
                 )
                 
                 # Create BSCSingleSample object using the SingleSampleData object
