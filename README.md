@@ -97,4 +97,3 @@ bsc = BSC(
    - Calculates attenuation coefficient from the data
    - Uses central frequency (2.5 MHz) for coefficient calculation
 
-```
