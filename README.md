@@ -83,17 +83,13 @@ bsc = BSC(
 
 1. **Phantom Normalization** (`normalized_with_phantom`):
    - Uses reference phantom data for normalization
-   - Requires phantom data in `data/phantom/` directory
 
 2. **Healthy Liver Normalization** (`normalized_with_healthy_liver`):
    - Uses healthy liver tissue as reference
-   - Requires ROI selection for both normal and abnormal tissue
 
 3. **Constant Alpha Correction** (`normalized_with_constant_alpha`):
    - Applies attenuation correction using a fixed alpha value
-   - Suitable when tissue properties are well-known
 
 4. **Calculated Alpha Correction** (`normalized_with_calculated_alpha`):
    - Calculates attenuation coefficient from the data
-   - Uses central frequency (2.5 MHz) for coefficient calculation
 
