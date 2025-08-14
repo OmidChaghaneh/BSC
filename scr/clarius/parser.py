@@ -25,7 +25,7 @@ from .transforms import scanConvert
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-#logging.disable(logging.INFO)
+logging.disable(logging.INFO)
 
 
 # tar file unpacker    
@@ -799,7 +799,7 @@ class ClariusParser():
                     data_dict = data_list  
                     previous_data_dict = data_dict 
                 else:
-                    logging.warning(f"No valid data for {timestamp}, using previous valid data.")
+                    #logging.warning(f"No valid data for {timestamp}, using previous valid data.")
                     data_dict = previous_data_dict if previous_data_dict else self.default_tgc_data
 
                 self.clean_tgc_data[timestamp] = data_dict
@@ -813,7 +813,14 @@ class ClariusParser():
             for frame in range(num_frames):
                 # Initialize TGC array with zeros
                 tgc_array_dB = np.zeros(len(self.full_depth_mm), dtype=np.float16)
-                values = list(self.clean_tgc_data.values())[frame]
+                
+                # Get TGC values for this frame, with bounds checking
+                tgc_values_list = list(self.clean_tgc_data.values())
+                if frame >= len(tgc_values_list):
+                    #logging.warning(f"Frame {frame} exceeds available TGC data ({len(tgc_values_list)} entries). Using last available TGC data.")
+                    values = tgc_values_list[-1] if tgc_values_list else self.default_tgc_data
+                else:
+                    values = tgc_values_list[frame]
 
                 # Extract depth and dB values
                 depths_mm = np.array([entry['depth'] for entry in values])
@@ -825,13 +832,16 @@ class ClariusParser():
                     if mask.any():
                         idx = mask.argmax()
                         if idx == 0:
+                            # If idx is 0, we're at the first depth point, use it directly
                             tgc_array_dB[i] = tgc_dB[idx]
                         else:
+                            # Safe interpolation between two points
                             x1, y1 = depths_mm[idx - 1], tgc_dB[idx - 1]
                             x2, y2 = depths_mm[idx], tgc_dB[idx]
                             tgc_array_dB[i] = y1 + (y2 - y1) * (depth - x1) / (x2 - x1)
                     else:
-                        tgc_array_dB[i] = tgc_dB[-1]
+                        # If no depths are greater than current depth, use the last TGC value
+                        tgc_array_dB[i] = tgc_dB[-1] if len(tgc_dB) > 0 else 0.0
 
                 # Visualization (optional)
                 if visualize:
@@ -1071,7 +1081,11 @@ class ClariusParser():
         def __init__(self, yml_path):
             
             self.path: str = yml_path
-            self.valid_versions: list[str] = ['12.0.1-673', '10.3.0-486']
+            self.valid_versions: list[str] = ['10.2.0-477',
+                                              '10.3.0-486',
+                                              '11.1.0-540',
+                                              '11.2.0-556',
+                                              '12.0.1-673',]
             
             # rf.yml
             self.rf_software_version: str
@@ -1123,7 +1137,7 @@ class ClariusParser():
                 logging.info(f"Version {software_version} is valid.")
             else:
                 logging.warning(f"Version {software_version} is not valid. This might cause some problems.")
-    
+
         ###################################################################################
         
         def load_rf_yml(self):
@@ -1224,11 +1238,17 @@ class ClariusParser():
                     elif current_timestamp is not None and line.startswith("- {"):
                         # Extract depth and dB values
                         values = line.replace("- {", "").replace("}", "").split(", ")
-                        depth = float(values[0].replace("mm", "").strip())
-                        dB = float(values[1].replace("dB", "").strip())
+                        if len(values) >= 2:
+                            try:
+                                depth = float(values[0].replace("mm", "").strip())
+                                dB = float(values[1].replace("dB", "").strip())
 
-                        # Store in list under the current timestamp
-                        self.timestamps[current_timestamp].append({"depth": depth, "dB": dB})
+                                # Store in list under the current timestamp
+                                self.timestamps[current_timestamp].append({"depth": depth, "dB": dB})
+                            except (ValueError, IndexError) as e:
+                                logging.warning(f"Failed to parse depth/dB values from line: {line}. Error: {e}")
+                        else:
+                            logging.warning(f"Invalid format in line: {line}. Expected at least 2 values.")
                 
             except Exception as e:
                 logging.error(f"Error loading YAML file: {e}")

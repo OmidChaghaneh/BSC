@@ -304,15 +304,30 @@ class ClariusDataUnpacker:
                 logging.info(f"Processing folder: {folder_path}")
                 
                 try:
+                    # List all files in the folder for debugging
+                    all_files = os.listdir(folder_path)
+                    logging.info(f"Files in {folder_path}: {all_files}")
+                    
                     rf_raw_files = [f for f in os.listdir(folder_path) 
                                   if f.endswith('rf.raw') and any(x in f for x in ["C3_large", "C3_small", "L15_large", "L15_small"])]
                     env_tgc_yml_files = [f for f in os.listdir(folder_path) if f.endswith('env.tgc.yml')]
                     rf_yml_files = [f for f in os.listdir(folder_path) if f.endswith('rf.yml')]
                     
-                    if not (rf_raw_files and env_tgc_yml_files and rf_yml_files):
-                        logging.warning(f"Missing required files in {folder_path}")
-                        continue
+                    logging.info(f"Found RF raw files: {rf_raw_files}")
+                    logging.info(f"Found env.tgc.yml files: {env_tgc_yml_files}")
+                    logging.info(f"Found rf.yml files: {rf_yml_files}")
                     
+                    # Check if any of the required file lists are empty
+                    if not rf_raw_files:
+                        logging.warning(f"No RF raw files found in {folder_path}")
+                        continue
+                    if not env_tgc_yml_files:
+                        logging.warning(f"No env.tgc.yml files found in {folder_path}")
+                        continue
+                    if not rf_yml_files:
+                        logging.warning(f"No rf.yml files found in {folder_path}")
+                        continue
+                        
                     rf_raw_path = os.path.join(folder_path, rf_raw_files[0])
                     env_tgc_yml_path = os.path.join(folder_path, env_tgc_yml_files[0])
                     rf_yml_path = os.path.join(folder_path, rf_yml_files[0])
@@ -342,6 +357,54 @@ class ClariusDataUnpacker:
                     
                 except Exception as e:
                     logging.error(f"Error processing folder {folder_path}: {e}")
+
+    def _validate_extracted_folder(self, folder_path: Path) -> bool:
+        """
+        Validates that an extracted folder contains all necessary files.
+        
+        Args:
+            folder_path (Path): Path to the extracted folder to validate
+            
+        Returns:
+            bool: True if folder contains all necessary files, False otherwise
+        """
+        required_file_patterns = [
+            "*_rf.raw.lzo",
+            "*_rf.yml"
+        ]
+        
+        missing_files = []
+        for pattern in required_file_patterns:
+            matching_files = list(folder_path.glob(pattern))
+            if not matching_files:
+                missing_files.append(pattern)
+        
+        if missing_files:
+            logging.warning(f"Extracted folder {folder_path} is missing required files: {missing_files}")
+            return False
+        
+        logging.info(f"Extracted folder {folder_path} validation successful - all required files present")
+        return True
+
+    def _cleanup_incomplete_extracted_folders(self, path: Path) -> None:
+        """
+        Removes extracted folders that don't contain all necessary files.
+        
+        Args:
+            path (Path): Path to the directory containing extracted folders
+        """
+        logging.info("Validating extracted folders and removing incomplete ones...")
+        
+        # Find all extracted folders
+        extracted_folders = [f for f in path.iterdir() if f.is_dir() and "extracted" in f.name]
+        
+        for folder in extracted_folders:
+            if not self._validate_extracted_folder(folder):
+                try:
+                    logging.info(f"Removing incomplete extracted folder: {folder}")
+                    shutil.rmtree(folder)
+                except Exception as e:
+                    logging.error(f"Error removing incomplete folder {folder}: {e}")
 
     def unpack_data(self, path: Union[str, Path], extraction_mode: str = "multiple_samples") -> Optional[ClariusTarUnpacker]:
         """
@@ -394,6 +457,10 @@ class ClariusDataUnpacker:
                         logging.info(f"Renaming files for sample: {sample_dir.name}")
                         self._rename_clarius_files(temp_unpacker)
                         
+                        # Validate and cleanup incomplete extracted folders for this sample
+                        logging.info(f"Validating extracted folders for sample: {sample_dir.name}")
+                        self._cleanup_incomplete_extracted_folders(sample_dir)
+                        
                         logging.info(f"Cleaning up excessive extracted folders for sample: {sample_dir.name}")
                         self._delete_excessive_extracted_folders(sample_dir)
                         
@@ -410,6 +477,10 @@ class ClariusDataUnpacker:
                 )
                 logging.info("Renaming Clarius files...")
                 self._rename_clarius_files(unpacker)
+                
+                # Validate and cleanup incomplete extracted folders
+                logging.info("Validating extracted folders...")
+                self._cleanup_incomplete_extracted_folders(path)
                 
                 logging.info("Cleaning up excessive extracted folders...")
                 self._delete_excessive_extracted_folders(path)
