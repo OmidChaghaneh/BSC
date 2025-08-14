@@ -9,4 +9,8 @@ PyYAML>=6.0
 scikit-learn>=1.0.0
 scipy>=1.7.0
 tqdm>=4.65.0
-PyQt5>=5.15.0 
+PyQt5>=5.15.0
+# DICOM decompression dependencies
+pylibjpeg>=2.0
+pylibjpeg-libjpeg>=2.1
+pyjpegls>=1.2 
