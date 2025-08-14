@@ -346,8 +346,8 @@ class ROI_selector_app(QMainWindow):
             try:
                 self.read_dcm()
             except Exception as e:
-                print(e)
-                #QMessageBox.warning(self, "Error", f"Failed to load .dcm files. Error: {e}")
+                print(f"DICOM loading error: {e}")
+                # Don't show warning message for DICOM errors as they're expected
                 self.display_dcm_empty()
 
     #################################################################################################
@@ -440,20 +440,29 @@ class ROI_selector_app(QMainWindow):
         if dcm_files:
             for dcm_file in dcm_files:
                 print(dcm_file)
-      
-        # Read the DICOM file using pydicom
-        dcm = pydicom.dcmread(dcm_files[0])
-
-        # Extract pixel data from the DICOM file
-        pixel_array = dcm.pixel_array
-
-        # Load the selected .npy file
-        self.dcm_data_4d = np.array(pixel_array)
         
-        print("dcm_data_4d shape :", self.dcm_data_4d.shape)
-        
-        # Display the first frame of the processed data
-        self.display_dcm(0)
+        # Try to read the DICOM file using pydicom with error handling
+        try:
+            # Read the DICOM file using pydicom
+            dcm = pydicom.dcmread(dcm_files[0])
+
+            # Extract pixel data from the DICOM file
+            pixel_array = dcm.pixel_array
+
+            # Load the selected .npy file
+            self.dcm_data_4d = np.array(pixel_array)
+            
+            print("dcm_data_4d shape :", self.dcm_data_4d.shape)
+            
+            # Display the first frame of the processed data
+            self.display_dcm(0)
+            
+        except Exception as e:
+            print(f"Error reading DICOM file: {e}")
+            # Set dcm_data_4d to None to indicate failure
+            self.dcm_data_4d = None
+            # Display empty DCM plot
+            self.display_dcm_empty()
             
     #################################################################################################
     
