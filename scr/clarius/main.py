@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from scipy.signal import stft, istft
+from scipy.interpolate import RegularGridInterpolator
 import matplotlib.pyplot as plt
 from scipy.stats import linregress
 
@@ -1486,12 +1487,52 @@ class BSCSingleSample:
         normalized_dict = {}
         
         for freq in energy_dict_3d.keys():
-            if freq in energy_dict_2d:               
-                # Add a new axis for frames to enable broadcasting
-                data_2d_expanded = energy_dict_2d[freq][..., np.newaxis]
+            if freq in energy_dict_2d:
+                # Get shapes for debugging
+                data_3d_shape = energy_dict_3d[freq].shape
+                data_2d_shape = energy_dict_2d[freq].shape
+                
+                logging.info(f"Normalizing frequency {freq:.2f} MHz - 3D shape: {data_3d_shape}, 2D shape: {data_2d_shape}")
+                
+                # Check if the number of lines and time points match
+                if data_3d_shape[0] != data_2d_shape[0] or data_3d_shape[1] != data_2d_shape[1]:
+                    #logging.warning(f"Shape mismatch for frequency {freq:.2f} MHz. "
+                    #              f"3D: {data_3d_shape}, 2D: {data_2d_shape}. "
+                    #              f"Interpolating 2D data to match 3D dimensions.")
+                    
+                    # Interpolate 2D data to match 3D dimensions
+                    n_lines_3d, n_time_points_3d, n_frames_3d = data_3d_shape
+                    n_lines_2d, n_time_points_2d = data_2d_shape
+                    
+                    # Create interpolation grid for 2D data
+                    lines_2d = np.linspace(0, 1, n_lines_2d)
+                    time_2d = np.linspace(0, 1, n_time_points_2d)
+                    
+                    # Create target grid for 3D data
+                    lines_3d = np.linspace(0, 1, n_lines_3d)
+                    time_3d = np.linspace(0, 1, n_time_points_3d)
+                    
+                    # Interpolate 2D data to match 3D dimensions
+                    # Create interpolation grid for 2D data
+                    interpolator = RegularGridInterpolator((lines_2d, time_2d), energy_dict_2d[freq], method='linear')
+                    
+                    # Create target grid for 3D data
+                    lines_3d_grid, time_3d_grid = np.meshgrid(lines_3d, time_3d, indexing='ij')
+                    points = np.column_stack((lines_3d_grid.ravel(), time_3d_grid.ravel()))
+                    
+                    # Interpolate
+                    data_2d_interpolated = interpolator(points).reshape(n_lines_3d, n_time_points_3d)
+                    
+                    # Add a new axis for frames to enable broadcasting
+                    data_2d_expanded = data_2d_interpolated[..., np.newaxis]
+                else:
+                    # Shapes match, use original 2D data
+                    data_2d_expanded = energy_dict_2d[freq][..., np.newaxis]
                 
                 # Normalize all frames using broadcasting
                 normalized_dict[freq] = energy_dict_3d[freq] / data_2d_expanded
+                
+                logging.info(f"Successfully normalized frequency {freq:.2f} MHz")
             else:
                 logging.warning(f"Frequency {freq:.2f} MHz not found in reference data")
                 
