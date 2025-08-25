@@ -1676,3 +1676,270 @@ class BSC:
             
             
             
+class HilbertTransformProcessor:
+    """
+    A class to process samples and create an Excel file with different frames for each sample
+    containing the Hilbert transformation of signals without normalization.
+    """
+    
+    def __init__(self,
+                 samples_folder_path: str,
+                 result_folder_path: str,
+                 roi_folder_path: str,
+                 roi_size: str = 'large'):
+        """
+        Initialize the HilbertTransformProcessor.
+        
+        Args:
+            samples_folder_path (str): Path to the samples folder
+            result_folder_path (str): Path where to save the Excel file
+            roi_folder_path (str): Path to the ROI folder
+            roi_size (str): Size of ROI to use, either 'large' or 'small'. Defaults to 'large'
+        """
+        self.samples_folder_path = Path(samples_folder_path)
+        self.result_folder_path = Path(result_folder_path)
+        self.roi_folder_path = Path(roi_folder_path)
+        self.roi_size = roi_size
+        
+        # Validate roi_size
+        if roi_size.lower() not in ['large', 'small']:
+            raise ValueError("roi_size must be either 'large' or 'small'")
+        
+        # Create result directory
+        self.result_folder_path.mkdir(parents=True, exist_ok=True)
+        
+        # Run the processing
+        self.__run()
+    
+    def __run(self):
+        """Main processing method."""
+        try:
+            logging.info("Starting Hilbert transform processing")
+            
+            # Get all sample folders
+            sample_folders = [f for f in self.samples_folder_path.iterdir() if f.is_dir()]
+            
+            if not sample_folders:
+                logging.error(f"No sample folders found in {self.samples_folder_path}")
+                return
+            
+            logging.info(f"Found {len(sample_folders)} sample folders")
+            
+            # Process each sample
+            for sample_folder in sample_folders:
+                try:
+                    logging.info(f"Processing sample: {sample_folder.name}")
+                    
+                    # Process the sample and get Hilbert transform data
+                    hilbert_data_dict = self._process_single_sample(sample_folder)
+                    
+                    if hilbert_data_dict is not None:
+                        # Print signal shape information
+                        self._print_signal_shape_info(hilbert_data_dict, sample_folder.name)
+                        
+                        # Save results for this sample
+                        self.save_hilbert_results_as_excel(hilbert_data_dict, sample_folder.name)
+                        logging.info(f"Saved Hilbert transform data for {sample_folder.name}")
+                    
+                except Exception as e:
+                    logging.error(f"Error processing sample {sample_folder.name}: {str(e)}")
+                    continue
+            
+            logging.info(f"Hilbert transform processing completed for all samples")
+            
+        except Exception as e:
+            logging.error(f"Error in Hilbert transform processing: {str(e)}")
+            raise
+    
+    def _process_single_sample(self, sample_folder: Path) -> Optional[dict]:
+        """
+        Process a single sample and return Hilbert transform data.
+        
+        Args:
+            sample_folder (Path): Path to the sample folder
+            
+        Returns:
+            Optional[dict]: Dictionary containing Hilbert transform data organized by frame or None if failed
+        """
+        try:
+            # Construct ROI file path
+            roi_file_path = self.roi_folder_path / f"{sample_folder.name}.xlsx"
+            
+            if not roi_file_path.exists():
+                logging.warning(f"ROI file not found for sample {sample_folder.name}: {roi_file_path}")
+                return None
+            
+            # Create SingleSampleData object
+            single_sample_data = SingleSampleData(
+                sample_folder_path=sample_folder,
+                roi_file_path=roi_file_path,
+                roi_size=self.roi_size
+            )
+            
+            # Get the ROI data (unnormalized)
+            roi_data = single_sample_data.data_3d_roi_unnormal
+            
+            if roi_data is None:
+                logging.warning(f"No ROI data available for sample {sample_folder.name}")
+                return None
+            
+            # Calculate Hilbert transform for each frame
+            hilbert_results = self._calculate_hilbert_transform(roi_data, sample_folder.name)
+            
+            return hilbert_results
+            
+        except Exception as e:
+            logging.error(f"Error processing sample {sample_folder.name}: {str(e)}")
+            return None
+    
+    def _calculate_hilbert_transform(self, roi_data: np.ndarray, sample_name: str) -> dict:
+        """
+        Calculate Hilbert transform for the ROI data and extract only amplitude.
+        Returns data in the same format as BSC for consistent processing.
+        
+        Args:
+            roi_data (np.ndarray): 3D ROI data array (lines, samples, frames)
+            sample_name (str): Name of the sample
+            
+        Returns:
+            dict: Dictionary containing Hilbert transform amplitude data organized by frame
+        """
+        try:
+            from scipy.signal import hilbert
+            
+            n_lines, n_samples, n_frames = roi_data.shape
+            logging.info(f"Calculating Hilbert transform amplitude for {sample_name} - Shape: {roi_data.shape}")
+            
+            # Initialize dictionary to store results by frame
+            hilbert_data_dict = {}
+            
+            # Process each frame
+            for frame_idx in range(n_frames):
+                logging.info(f"Processing frame {frame_idx + 1}/{n_frames} for {sample_name}")
+                
+                # Get current frame
+                frame_data = roi_data[:, :, frame_idx]  # Shape: (lines, samples)
+                
+                # Initialize amplitude array for this frame
+                amplitude_data = np.zeros((n_lines, n_samples))
+                
+                # Calculate Hilbert transform for each line
+                for line_idx in range(n_lines):
+                    # Get current line
+                    line_signal = frame_data[line_idx, :]
+                    
+                    # Calculate Hilbert transform
+                    analytic_signal = hilbert(line_signal)
+                    
+                    # Extract only amplitude
+                    amplitude = np.abs(analytic_signal)
+                    
+                    # Store amplitude data
+                    amplitude_data[line_idx, :] = amplitude
+                
+                # Store frame data in dictionary
+                hilbert_data_dict[frame_idx + 1] = amplitude_data
+            
+            logging.info(f"Completed Hilbert transform amplitude calculation for {sample_name}")
+            logging.info(f"Number of frames processed: {len(hilbert_data_dict)}")
+            
+            return hilbert_data_dict
+            
+        except Exception as e:
+            logging.error(f"Error calculating Hilbert transform amplitude for {sample_name}: {str(e)}")
+            raise
+    
+    def save_hilbert_results_as_excel(self, hilbert_data_dict: dict, sample_name: str) -> None:
+        """
+        Save Hilbert transform amplitude results to Excel files following BSC pattern.
+        Creates one Excel file with only the first frame information.
+        Time points are rows and lines are columns in the output.
+        
+        Args:
+            hilbert_data_dict: Dictionary containing Hilbert transform data organized by frame
+            sample_name: Name of the sample
+        """
+        try:
+            # Create result directory path mirroring the samples structure
+            result_dir = Path(self.result_folder_path) / sample_name
+            result_dir.mkdir(parents=True, exist_ok=True)
+            
+            logging.info(f"Saving Hilbert transform results for sample {sample_name} to {result_dir}")
+            
+            # Create Excel file for Hilbert transform amplitude
+            hilbert_file = result_dir / "hilbert_amplitude.xlsx"
+            
+            with pd.ExcelWriter(hilbert_file, engine='openpyxl') as writer:
+                # Get only the first frame data
+                frame_numbers = list(hilbert_data_dict.keys())
+                if frame_numbers:
+                    first_frame_idx = frame_numbers[0]
+                    amplitude_data = hilbert_data_dict[first_frame_idx]
+                    
+                    # Get frame data and transpose it (like BSC)
+                    # amplitude_data shape: (lines, samples)
+                    n_lines, n_samples = amplitude_data.shape
+                    
+                    # Transpose to make time_points rows and lines columns (like BSC)
+                    frame_data_transposed = amplitude_data.T  # Shape: (samples, lines)
+                    
+                    # Convert to DataFrame with transposed orientation
+                    df = pd.DataFrame(
+                        frame_data_transposed,
+                        index=[f"Time_{i+1}" for i in range(n_samples)],
+                        columns=[f"Line_{i+1}" for i in range(n_lines)]
+                    )
+                    
+                    # Save to sheet
+                    sheet_name = "Frame_1"
+                    df.to_excel(writer, sheet_name=sheet_name)
+                    
+                    logging.info(f"Saved first frame (Frame_{first_frame_idx}) data to sheet {sheet_name}")
+                else:
+                    logging.warning(f"No frames available for sample {sample_name}")
+            
+            logging.info(f"Saved Hilbert transform amplitude data (first frame only) to {hilbert_file}")
+            
+        except Exception as e:
+            logging.error(f"Error saving Hilbert transform results: {str(e)}")
+            raise
+    
+    def _print_signal_shape_info(self, hilbert_data_dict: dict, sample_name: str) -> None:
+        """
+        Print signal shape information for a sample.
+        
+        Args:
+            hilbert_data_dict: Dictionary containing Hilbert transform data organized by frame
+            sample_name: Name of the sample
+        """
+        try:
+            if not hilbert_data_dict:
+                logging.warning(f"No data available for sample {sample_name}")
+                return
+            
+            # Get frame information
+            frame_numbers = list(hilbert_data_dict.keys())
+            num_frames = len(frame_numbers)
+            
+            # Get shape information from first frame
+            first_frame_data = hilbert_data_dict[frame_numbers[0]]
+            n_lines, n_samples = first_frame_data.shape
+            
+            # Print shape information
+            logging.info(f"=== Signal Shape Information for {sample_name} ===")
+            logging.info(f"Number of frames: {num_frames}")
+            logging.info(f"Number of lines: {n_lines}")
+            logging.info(f"Number of samples per line: {n_samples}")
+            logging.info(f"Frame range: {min(frame_numbers)} to {max(frame_numbers)}")
+            logging.info(f"Total data points: {num_frames * n_lines * n_samples:,}")
+            logging.info(f"Data shape per frame: ({n_lines}, {n_samples})")
+            logging.info(f"================================================")
+            
+        except Exception as e:
+            logging.error(f"Error printing signal shape info for {sample_name}: {str(e)}") 
+            
+            
+            
+            
+            
+            
